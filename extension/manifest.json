@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Recon",
+  "version": "0.3.0",
+  "description": "Email intelligence — open tracking for Gmail",
+  "permissions": ["activeTab", "storage", "scripting"],
+  "host_permissions": [
+    "https://mail.google.com/*",
+    "http://localhost:8000/*",
+    "https://localhost:8000/*",
+    "https://*.trycloudflare.com/*",
+    "https://track.yourdomain.com/*"
+  ],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": "icons/icon16.png"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

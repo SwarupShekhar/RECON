@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+server/.env
+.tokensave/
+*.pem
+node_modules/
