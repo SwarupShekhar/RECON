@@ -76,11 +76,11 @@ Team uses Mailsuite (paid, per-seat) to track lead email opens on business domai
 - **Deployment:** Cloudflare Tunnel (`*.trycloudflare.com`) for HTTPS during dev. Production deploy to Vultr + real domain pending.
 
 ### TODO
-- **Phase 5:** Self-tracking suppression (don't count own opens).
-- **Phase 6:** Link click tracking + PDF open tracking.
-- **Phase 7:** Instant open alerts (desktop push / Slack).
-- **Phase 8:** Team dashboard + analytics.
-- **Phase 9:** Email sequences / cadences.
+- **Phase 5:** Self-tracking suppression (don't count own opens). — TODO
+- **Phase 6:** ~~Link click tracking + PDF open tracking.~~ — DONE
+- **Phase 7:** ~~Instant open alerts (desktop push / Slack).~~ — DONE
+- **Phase 8:** Team dashboard + analytics. — PARTIAL (weekly/monthly reports done, full dashboard TODO)
+- **Phase 9:** Email sequences / cadences. — TODO
 - **Production deploy:** Vultr + real domain + Let's Encrypt SSL (replace Cloudflare Tunnel).
 
 ## 11. Success Metrics
@@ -103,12 +103,12 @@ Mailsuite charges per-seat for basic open tracking. Recon is self-owned, per-tea
 - [ ] **Per-recipient open tracking** — individual tracking for group/CC emails (To, CC, BCC)
 - [ ] **Open count per email** — number of times opened per recipient
 - [ ] **Reopen tracking per email** — tracks every open, not just first
-- [ ] **Apple MPP detection** — flag prefetches as unverified (CloudImageProxy in User-Agent)
-- [ ] **Lives entirely inside Gmail** — no separate dashboard needed
-- [ ] **No branding** — clean, white-label experience, no "Sent with Mailsuite" footer
-- [ ] **Instant open alerts** — desktop/Slack push when lead opens email (real-time, not daily summary)
-- [ ] **Link click tracking** — rewrite links to track clicks, see which links get engagement
-- [ ] **PDF open tracking** — track when recipients open attached PDFs
+- [x] **Apple MPP detection** — flag prefetches as unverified (CloudImageProxy in User-Agent)
+- [x] **Lives entirely inside Gmail** — no separate dashboard needed
+- [x] **No branding** — clean, white-label experience, no "Sent with Mailsuite" footer
+- [x] **Instant open alerts** — desktop notification (extension, chrome.notifications via 1-min alarm) + Slack webhook (server, fire-and-forget on open/click)
+- [x] **Link click tracking** — compose-body `<a href>` rewritten to tracked redirect URL, per-link click count + last-clicked in `/status/sent`
+- [x] **PDF open tracking** — link-based only (`.pdf`-labeled tracked links); true attachment-open detection isn't feasible via Chrome extension (can't instrument attached file bytes) — reps must link to the PDF, not attach it
 
 ### Recon Premium Features (what Mailsuite charges extra for or doesn't offer)
 - [ ] **Advanced alerts & custom notifications** — configurable rules (e.g., "alert if opened 3+ times", "alert if opened from new device")
@@ -130,10 +130,11 @@ Mailsuite charges per-seat for basic open tracking. Recon is self-owned, per-tea
 - [x] Phase 1: Pixel server + DB — DONE
 - [x] Phase 2: Chrome extension send interception + pixel injection — DONE
 - [x] Phase 4: Apple MPP detection — DONE
-- [ ] Phase 3: Sent view checkmarks — IN PROGRESS (code written, DOM selectors need fixing)
+- [x] Phase 3: Sent view checkmarks — DONE (thread_id-based matching + per-recipient breakdown; list-row DOM selectors still best-effort, see Known Issues in HANDOFF.md)
 - [ ] Phase 5: Self-tracking suppression
-- [ ] Phase 6: Link click tracking
-- [ ] Phase 7: Analytics dashboard + reports
+- [x] Phase 6: Link click tracking — DONE (link-based, see PDF caveat above)
+- [x] Phase 7: Instant open alerts — DONE (Slack + desktop)
+- [~] Phase 8: Analytics dashboard + reports — PARTIAL (weekly/monthly HTML reports done; full team dashboard still open)
 
 ## 14. Resolved Decisions
 - **Pixel server:** FastAPI (Python) — consistent with Vaicore stack.

@@ -14,25 +14,38 @@
     if (changes.senderEmail) config.senderEmail = changes.senderEmail.newValue;
   });
 
-  async function createTracker(recipientEmail, subject, threadId, field) {
+  // `links` (optional) is an array of {url, type} for link/PDF click tracking
+  // (Phase 6). See collectTrackableLinks() below — only passed on ONE
+  // recipient's createTracker call per send since the compose body/its links
+  // are shared across all recipients, not per-recipient.
+  //
+  // Assumption about the backend contract (server is being built in parallel
+  // — reconcile against what actually lands):
+  //   POST /track request body may include `links: [{ url, type: "link"|"pdf" }]`.
+  //   POST /track response may include `links: [{ link_id, tracked_url }]`,
+  //   in the SAME ORDER as the request array.
+  async function createTracker(recipientEmail, subject, threadId, field, links) {
     return new Promise((resolve, reject) => {
+      const payload = {
+        sender_email: config.senderEmail,
+        recipient_email: recipientEmail,
+        subject: subject,
+        thread_id: threadId,
+        recipient_field: field,
+      };
+      if (links && links.length > 0) payload.links = links;
+
       chrome.runtime.sendMessage(
         {
           type: "track",
           serverUrl: config.serverUrl,
-          payload: {
-            sender_email: config.senderEmail,
-            recipient_email: recipientEmail,
-            subject: subject,
-            thread_id: threadId,
-            recipient_field: field,
-          },
+          payload,
         },
         (response) => {
           if (chrome.runtime.lastError) {
             reject(new Error(chrome.runtime.lastError.message));
           } else if (response?.ok) {
-            resolve(response.tracker_id);
+            resolve({ trackerId: response.tracker_id, links: response.links || [] });
           } else {
             reject(new Error(response?.error || "Unknown error"));
           }
@@ -112,10 +125,18 @@
     return h2 ? h2.textContent : "";
   }
 
+  // Shared by getThreadId() (compose-time) and injectThreadCheckmark()
+  // (open-thread rendering) so both rely on the exact same hash pattern
+  // instead of two regexes drifting apart.
+  function extractThreadIdFromHash(hash) {
+    const match = hash.match(/\/(\d+[a-f0-9]+)/);
+    return match ? match[1] : null;
+  }
+
   function getThreadId(container) {
     const hash = window.location.hash;
-    const match = hash.match(/\/(\d+[a-f0-9]+)/);
-    if (match) return match[1];
+    const fromHash = extractThreadIdFromHash(hash);
+    if (fromHash) return fromHash;
 
     const dialog = container.closest('div[role="dialog"]');
     if (dialog) {
@@ -134,6 +155,67 @@
     if (body.innerHTML.includes("pixel.gif")) return;
     body.insertAdjacentHTML("beforeend", buildPixelHtml(trackerId));
     console.log("[Recon] Injected pixel for tracker:", trackerId);
+  }
+
+  // ---- Link / PDF click tracking (Phase 6, new) ----
+
+  function isOwnTrackedUrl(href) {
+    if (!config.serverUrl) return false;
+    try {
+      return href.indexOf(config.serverUrl) === 0;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  // Scans the compose body ONCE per send for <a href> the rep actually typed
+  // or pasted into the message. Real file attachments are separate MIME
+  // parts, not part of this DOM, so they can't be tracked this way — "PDF
+  // tracking" here is limited to typed/pasted links whose href ends in
+  // .pdf or whose visible text mentions "pdf".
+  //
+  // Returns [] (without re-scanning) if this body was already processed —
+  // guards against re-collecting/re-sending the same links on a retry
+  // within the same send.
+  function collectTrackableLinks(body) {
+    if (!body || body.dataset.reconLinksDone === "1") return [];
+
+    const links = [];
+    try {
+      const anchors = body.querySelectorAll("a[href]");
+      anchors.forEach((a) => {
+        const href = (a.getAttribute("href") || "").trim();
+        if (!href) return;
+        if (href.toLowerCase().startsWith("mailto:")) return;
+        if (isOwnTrackedUrl(href)) return;
+
+        const text = (a.textContent || "").toLowerCase();
+        const isPdf = href.toLowerCase().split(/[?#]/)[0].endsWith(".pdf") || text.includes("pdf");
+        links.push({ url: href, type: isPdf ? "pdf" : "link", el: a });
+      });
+    } catch (err) {
+      console.warn("[Recon] collectTrackableLinks failed:", err);
+    }
+    return links;
+  }
+
+  // Rewrites each collected <a>'s href to the server-provided tracked_url,
+  // matching request/response by array index. Idempotent per body via the
+  // reconLinksDone flag.
+  function applyTrackedLinks(body, collected, trackedLinks) {
+    if (!body || body.dataset.reconLinksDone === "1") return;
+    try {
+      trackedLinks.forEach((tl, idx) => {
+        const original = collected[idx];
+        if (!original || !original.el || !tl?.tracked_url) return;
+        original.el.setAttribute("href", tl.tracked_url);
+      });
+      console.log("[Recon] Rewrote", trackedLinks.length, "link(s) to tracked URLs");
+    } catch (err) {
+      console.warn("[Recon] applyTrackedLinks failed:", err);
+    } finally {
+      body.dataset.reconLinksDone = "1";
+    }
   }
 
   async function handleSend(container) {
@@ -159,13 +241,45 @@
 
     console.log("[Recon] Sending to:", recipients.map(r => `${r.email} (${r.field})`).join(", "), "subject:", subject);
 
-    for (const { email, field } of recipients) {
+    // Gather compose-body links ONCE — the body/its HTML is shared across
+    // all recipients in this single send, so links can't be personalized
+    // per-recipient. Attribution of any resulting clicks is therefore only
+    // to "someone in this send," not a specific recipient — known limitation.
+    const trackableLinks = collectTrackableLinks(body);
+
+    for (let i = 0; i < recipients.length; i++) {
+      const { email, field } = recipients[i];
+      // Arbitrary attribution owner: attach links to the first recipient's
+      // tracker call only.
+      const linksForThisCall = (i === 0 && trackableLinks.length > 0)
+        ? trackableLinks.map(l => ({ url: l.url, type: l.type }))
+        : undefined;
+
       try {
-        const trackerId = await createTracker(email, subject, threadId, field);
+        const { trackerId, links: trackedLinks } = await createTracker(email, subject, threadId, field, linksForThisCall);
         injectPixel(body, trackerId);
+
+        if (linksForThisCall && trackedLinks && trackedLinks.length > 0) {
+          applyTrackedLinks(body, trackableLinks, trackedLinks);
+        }
       } catch (err) {
         console.error("[Recon] Tracker failed:", err);
       }
+    }
+  }
+
+  function isScheduleSendConfirmButton(el) {
+    if (!el) return false;
+    try {
+      const label = (el.getAttribute?.('aria-label') || '').toLowerCase();
+      if (label.includes('schedule send')) return true;
+      const text = (el.textContent || '').trim().toLowerCase();
+      // Keep this narrow (short text) so we don't accidentally bind every
+      // button on the page that happens to contain these words somewhere
+      // in a larger container's textContent.
+      return text.length > 0 && text.length < 40 && text.includes('schedule send');
+    } catch (err) {
+      return false;
     }
   }
 
@@ -177,6 +291,8 @@
       'div[role="button"][aria-label*="send"]',
       'div.T-I.J-J5-Ji[aria-label*="Send"]',
       'div[role="button"][gh="cm"]',
+      'div[role="button"][aria-label*="Schedule send"]',
+      'div[role="button"][aria-label*="schedule send"]',
     ];
     for (const sel of selectors) {
       const btn = el.querySelector(sel);
@@ -186,7 +302,30 @@
   }
 
   function findComposeContainer(btn) {
-    return btn.closest('div[role="dialog"]') || btn.closest('div.nH') || btn.parentElement?.parentElement?.parentElement;
+    const direct = btn.closest('div[role="dialog"]') || btn.closest('div.nH');
+    if (direct) return direct;
+
+    // Gmail's "Schedule send" confirm button lives in a small popup dialog
+    // that isn't always nested inside the compose window's own DOM subtree.
+    // Fall back to locating an open compose window elsewhere on the page —
+    // best-effort, since we can't verify this against a live Gmail DOM.
+    try {
+      const dialogs = document.querySelectorAll('div[role="dialog"]');
+      for (let i = dialogs.length - 1; i >= 0; i--) {
+        const d = dialogs[i];
+        if (
+          d.querySelector('input[name="subjectbox"]') ||
+          d.querySelector('div[aria-label*="Message Body"]') ||
+          d.querySelector('div[contenteditable="true"]')
+        ) {
+          return d;
+        }
+      }
+    } catch (err) {
+      console.warn('[Recon] findComposeContainer fallback failed:', err);
+    }
+
+    return btn.parentElement?.parentElement?.parentElement || null;
   }
 
   function bindSendButton(btn) {
@@ -203,14 +342,29 @@
   }
 
   function scanForSendButtons(root) {
-    const selectors = [
-      'div[role="button"][aria-label*="Send"]',
-      'div[role="button"][data-tooltip*="Send"]',
-      'div[role="button"][aria-label*="send"]',
-      'div.T-I.J-J5-Ji[aria-label*="Send"]',
-    ];
-    for (const sel of selectors) {
-      root.querySelectorAll(sel).forEach(bindSendButton);
+    if (!root || !root.querySelectorAll) return;
+    try {
+      const selectors = [
+        'div[role="button"][aria-label*="Send"]',
+        'div[role="button"][data-tooltip*="Send"]',
+        'div[role="button"][aria-label*="send"]',
+        'div.T-I.J-J5-Ji[aria-label*="Send"]',
+        'div[role="button"][aria-label*="Schedule send"]',
+        'div[role="button"][aria-label*="schedule send"]',
+      ];
+      for (const sel of selectors) {
+        root.querySelectorAll(sel).forEach(bindSendButton);
+      }
+
+      // Fallback for Gmail's schedule-send confirm button, whose aria-label
+      // doesn't reliably include "Schedule send" — match on visible text
+      // too. Defensive: Gmail's DOM here is undocumented/unstable, mirrors
+      // the existing fragile-selector tradeoff already accepted in this file.
+      root.querySelectorAll('div[role="button"]').forEach((el) => {
+        if (isScheduleSendConfirmButton(el)) bindSendButton(el);
+      });
+    } catch (err) {
+      console.warn('[Recon] scanForSendButtons error:', err);
     }
   }
 
@@ -310,9 +464,132 @@
     return null;
   }
 
-  async function injectSentCheckmarks() {
+  // Best-effort thread-id extraction for a Gmail list row. Gmail row markup
+  // is undocumented and changes frequently; this tries a few plausible
+  // spots (anchor hrefs encoding a thread id, common data-* attributes)
+  // and returns null if none pan out, in which case callers fall back to
+  // the existing recipient+subject fuzzy heuristic. NOTE: unverified
+  // against a live Gmail DOM — flagged for manual smoke-testing.
+  function getThreadIdFromRow(row) {
+    try {
+      const links = row.querySelectorAll('a[href*="#"]');
+      for (const link of links) {
+        const href = link.getAttribute('href') || '';
+        const id = extractThreadIdFromHash(href);
+        if (id) return id;
+      }
+
+      const dataThreadEl = row.matches?.('[data-thread-id]') ? row : row.querySelector('[data-thread-id]');
+      if (dataThreadEl) {
+        const id = dataThreadEl.getAttribute('data-thread-id');
+        if (id) return id;
+      }
+
+      const legacyEl = row.matches?.('[data-legacy-thread-id]') ? row : row.querySelector('[data-legacy-thread-id]');
+      if (legacyEl) {
+        const id = legacyEl.getAttribute('data-legacy-thread-id');
+        if (id) return id;
+      }
+    } catch (err) {
+      console.warn('[Recon] getThreadIdFromRow failed:', err);
+    }
+    return null;
+  }
+
+  // ---- Shared matching + popover helpers (thread_id-first, fuzzy fallback) ----
+
+  function matchSentDataByThreadId(sentData, threadId) {
+    if (!threadId) return null;
+    const matches = sentData.filter((e) => e.thread_id != null && String(e.thread_id) === String(threadId));
+    return matches.length > 0 ? matches : null;
+  }
+
+  function matchSentDataFuzzy(sentData, recipient, subject) {
+    const match = sentData.find((e) => {
+      const recipientMatch = !recipient || e.recipient === recipient;
+      const subjectMatch = !subject || !e.subject ||
+        e.subject.toLowerCase().includes(subject.toLowerCase()) ||
+        subject.toLowerCase().includes(e.subject?.toLowerCase() || '');
+      return recipientMatch && subjectMatch;
+    });
+    return match ? [match] : null;
+  }
+
+  // Thread-id match takes priority (exact, unambiguous); only fall back to
+  // the recipient+subject heuristic when no thread_id is available (known
+  // limitation: thread_id is null for brand-new sends until Gmail assigns
+  // one — see HANDOFF.md known issues) or nothing matched by id.
+  function getMatchesForContext(sentData, threadId, recipient, subject) {
+    return matchSentDataByThreadId(sentData, threadId) ||
+      matchSentDataFuzzy(sentData, recipient, subject) ||
+      [];
+  }
+
+  function recipientFieldSortKey(field) {
+    const order = { to: 0, cc: 1, bcc: 2 };
+    return order[(field || '').toLowerCase()] ?? 3;
+  }
+
+  // Green if any recipient has a verified open, orange if only
+  // unverified/MPP opens exist, grey if nobody has opened yet.
+  function computeOverallStatus(matches) {
+    const anyVerified = matches.some((m) => (m.verified_opens || 0) > 0);
+    if (anyVerified) return 'green';
+    const anyOpened = matches.some((m) => (m.total_opens || 0) > 0);
+    if (anyOpened) return 'orange';
+    return 'grey';
+  }
+
+  function statusColor(status) {
+    if (status === 'green') return '#0d9e3f';
+    if (status === 'orange') return '#e67e22';
+    return '#bbb';
+  }
+
+  // Builds popover HTML for one or many sentData entries on the same
+  // thread (per-recipient breakdown for group/CC/BCC emails — each
+  // recipient gets its own line with its own open count / status / last
+  // opened time, sorted To -> Cc -> Bcc).
+  function buildPopoverHtml(matches) {
+    const sorted = [...matches].sort((a, b) => recipientFieldSortKey(a.recipient_field) - recipientFieldSortKey(b.recipient_field));
+
+    const rows = sorted.map((m) => {
+      const isVerified = (m.verified_opens || 0) > 0;
+      const opened = (m.total_opens || 0) > 0;
+      const dotColor = isVerified ? '#0d9e3f' : opened ? '#e67e22' : '#bbb';
+      const fieldLabel = m.recipient_field ? m.recipient_field.toUpperCase() : '';
+      const statusText = opened
+        ? `${m.total_opens > 1 ? `Opened ${m.total_opens}x` : 'Opened'}${m.last_opened_at ? ` · ${timeAgo(m.last_opened_at)}` : ''}${!isVerified ? ' (unverified)' : ''}`
+        : 'Not opened yet';
+
+      return `
+        <div style="display:flex;align-items:center;gap:6px;padding:3px 0;">
+          <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${dotColor};flex-shrink:0;"></span>
+          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${m.recipient || ''}${fieldLabel ? ` <span style="color:#999;font-size:11px;">(${fieldLabel})</span>` : ''}</span>
+          <span style="color:#666;font-size:11px;white-space:nowrap;">${statusText}</span>
+        </div>`;
+    }).join('');
+
+    const title = sorted.length > 1
+      ? `${sorted.length} recipients`
+      : (sorted[0]?.recipient ? `${sorted[0].recipient}` : 'Recipient');
+
+    return `<div style="font-weight:600;margin-bottom:6px;">${title}</div><div style="color:#555;">${rows}</div>`;
+  }
+
+  function injectSentCheckmarks() {
+    return injectSentCheckmarksAsync().catch((err) => console.warn('[Recon] injectSentCheckmarks failed:', err));
+  }
+
+  async function injectSentCheckmarksAsync() {
     const hash = window.location.hash;
-    if (!hash.includes('#sent') && !hash.includes('#inbox')) return;
+    // Restricted to Sent only (bug fix): Inbox list rows show the SENDER of
+    // an incoming message as their span[email] chip, not a tracked
+    // recipient — matching that against outbound sentData mistags unrelated
+    // inbound mail. injectThreadCheckmark (below) is scoped to one specific
+    // opened thread instead of ambiguous row-level chips, so it's safe to
+    // run on both #sent/ and #inbox/.
+    if (!hash.includes('#sent')) return;
 
     const sentData = await fetchSentStatus();
     if (!sentData || sentData.length === 0) return;
@@ -321,66 +598,68 @@
       'tr.zA, tr[class*="zA"], div[role="listitem"], tr[jscontroller]'
     );
 
+    const now = Date.now();
+    const GIVE_UP_MS = 5 * 60 * 1000;
+
     for (const row of rows) {
-      if (row._reconChecked) continue;
+      if (row._reconDone) continue;
 
       const recipient = getRecipientFromRow(row);
       const subject = getSubjectFromRow(row);
       if (!recipient && !subject) continue;
 
-      row._reconChecked = true;
+      // Track first-attempt time so we can bound retries, but do NOT mark
+      // the row done just because we scanned it — async tracker creation +
+      // the 10s sentData cache mean the match may simply not exist yet.
+      if (!row._reconFirstSeenAt) row._reconFirstSeenAt = now;
 
-      const match = sentData.find(e => {
-        const recipientMatch = e.recipient === recipient;
-        const subjectMatch = !subject || !e.subject ||
-          e.subject.toLowerCase().includes(subject.toLowerCase()) ||
-          subject.toLowerCase().includes(e.subject?.toLowerCase() || '');
-        return recipientMatch && subjectMatch;
-      });
+      const threadId = getThreadIdFromRow(row);
+      const matches = getMatchesForContext(sentData, threadId, recipient, subject);
 
-      if (!match) continue;
-
-      const indicator = document.createElement('span');
-      indicator.className = 'recon-checkmark';
-      indicator.style.cssText = 'font-size:14px;cursor:default;vertical-align:middle;margin-right:4px;letter-spacing:-2px;user-select:none;';
-
-      if (match.total_opens > 0) {
-        const isVerified = match.verified_opens > 0;
-        indicator.textContent = '✓✓';
-        indicator.style.color = isVerified ? '#0d9e3f' : '#e67e22';
-        indicator.title = '';
-
-        const popover = document.createElement('div');
-        popover.className = 'recon-popover';
-        popover.style.cssText = 'display:none;position:absolute;z-index:99999;background:#fff;border:1px solid #e0e0e0;border-radius:8px;padding:12px 16px;box-shadow:0 4px 12px rgba(0,0,0,0.15);font-size:13px;line-height:1.5;max-width:320px;pointer-events:none;';
-        popover.innerHTML = `
-          <div style="font-weight:600;margin-bottom:6px;">${match.recipient} opened your email${match.total_opens > 1 ? ` ${match.total_opens} times` : ''}</div>
-          <div style="color:#555;">
-            <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${isVerified ? '#0d9e3f' : '#e67e22'};margin-right:6px;"></span>
-            ${match.total_opens > 1 ? `First opened ${timeAgo(match.last_opened_at)}` : `Opened ${timeAgo(match.last_opened_at)}`}
-          </div>
-          ${match.last_opened_at ? `<div style="color:#888;font-size:11px;margin-top:4px;">Last: ${new Date(match.last_opened_at).toLocaleString()}</div>` : ''}
-        `;
-        indicator.appendChild(popover);
-
-        indicator.addEventListener('mouseenter', () => { popover.style.display = 'block'; });
-        indicator.addEventListener('mouseleave', () => { popover.style.display = 'none'; });
-      } else {
-        indicator.textContent = '✓✓';
-        indicator.style.color = '#bbb';
-        indicator.title = 'Sent — not opened yet';
+      if (matches.length === 0) {
+        if (now - row._reconFirstSeenAt > GIVE_UP_MS) {
+          row._reconDone = true; // give up — bound polling cost
+        }
+        continue; // keep retrying on future polls
       }
 
-      const starEl = row.querySelector('div[role="checkbox"][aria-label*="Star"]');
-      if (starEl && starEl.parentElement) {
-        starEl.parentElement.insertBefore(indicator, starEl.nextSibling);
+      row._reconDone = true; // match found and about to render — permanently done
+      renderRowIndicator(row, matches);
+    }
+  }
+
+  function renderRowIndicator(row, matches) {
+    if (row.querySelector('.recon-checkmark')) return;
+
+    const status = computeOverallStatus(matches);
+    const indicator = document.createElement('span');
+    indicator.className = 'recon-checkmark';
+    indicator.style.cssText = 'font-size:14px;cursor:default;vertical-align:middle;margin-right:4px;letter-spacing:-2px;user-select:none;position:relative;';
+    indicator.textContent = '✓✓';
+    indicator.style.color = statusColor(status);
+
+    if (status !== 'grey') {
+      const popover = document.createElement('div');
+      popover.className = 'recon-popover';
+      popover.style.cssText = 'display:none;position:absolute;z-index:99999;background:#fff;border:1px solid #e0e0e0;border-radius:8px;padding:12px 16px;box-shadow:0 4px 12px rgba(0,0,0,0.15);font-size:13px;line-height:1.5;max-width:320px;pointer-events:none;';
+      popover.innerHTML = buildPopoverHtml(matches);
+      indicator.appendChild(popover);
+
+      indicator.addEventListener('mouseenter', () => { popover.style.display = 'block'; });
+      indicator.addEventListener('mouseleave', () => { popover.style.display = 'none'; });
+    } else {
+      indicator.title = 'Sent — not opened yet';
+    }
+
+    const starEl = row.querySelector('div[role="checkbox"][aria-label*="Star"]');
+    if (starEl && starEl.parentElement) {
+      starEl.parentElement.insertBefore(indicator, starEl.nextSibling);
+    } else {
+      const firstCell = row.querySelector('td:first-child');
+      if (firstCell) {
+        firstCell.appendChild(indicator);
       } else {
-        const firstCell = row.querySelector('td:first-child');
-        if (firstCell) {
-          firstCell.appendChild(indicator);
-        } else {
-          row.prepend(indicator);
-        }
+        row.prepend(indicator);
       }
     }
   }
@@ -398,7 +677,11 @@
 
   async function injectThreadCheckmark() {
     const hash = window.location.hash;
-    if (!hash.includes('#sent/')) return;
+    // Widened (bug fix) to also run on #inbox/ — a thread you sent into can
+    // end up sitting in the Inbox view once there's a reply. Safe here
+    // (unlike the list-row version) because this function is scoped to one
+    // specific opened thread rather than ambiguous row-level chips.
+    if (!/#(sent|inbox)\//.test(hash)) return;
 
     if (document.querySelector('.recon-thread-check')) return;
 
@@ -416,36 +699,28 @@
     const subjectEl = document.querySelector('h2.hP');
     const subject = subjectEl?.textContent;
 
-    const match = sentData.find(e => {
-      const recipientMatch = !recipientEmail || e.recipient === recipientEmail;
-      const subjectMatch = !subject || e.subject?.toLowerCase().includes(subject.toLowerCase()) || subject.toLowerCase().includes(e.subject?.toLowerCase() || '');
-      return recipientMatch && subjectMatch;
-    });
+    // For an OPEN thread, the thread_id is trivially available from the URL
+    // hash — use the same regex as getThreadId() for consistency.
+    const threadId = extractThreadIdFromHash(hash);
+    const matches = getMatchesForContext(sentData, threadId, recipientEmail, subject);
+    if (matches.length === 0) return;
 
-    if (!match) return;
-
+    const status = computeOverallStatus(matches);
     const indicator = document.createElement('span');
     indicator.className = 'recon-thread-check';
-    indicator.style.cssText = 'font-size:14px;cursor:default;vertical-align:middle;margin-left:8px;letter-spacing:-2px;color:#0d9e3f;user-select:none;position:relative;';
+    indicator.style.cssText = 'font-size:14px;cursor:default;vertical-align:middle;margin-left:8px;letter-spacing:-2px;user-select:none;position:relative;';
+    indicator.textContent = '✓✓';
+    indicator.style.color = statusColor(status);
 
-    if (match.total_opens > 0) {
-      const isVerified = match.verified_opens > 0;
-      indicator.textContent = '✓✓';
-      indicator.style.color = isVerified ? '#0d9e3f' : '#e67e22';
-
+    if (status !== 'grey') {
       const popover = document.createElement('div');
-      popover.style.cssText = 'display:none;position:absolute;z-index:99999;background:#fff;border:1px solid #e0e0e0;border-radius:8px;padding:12px 16px;box-shadow:0 4px 12px rgba(0,0,0,0.15);font-size:13px;line-height:1.5;max-width:320px;bottom:100%;left:0;margin-bottom:8px;white-space:nowrap;';
-      popover.innerHTML = `
-        <div style="font-weight:600;margin-bottom:4px;">${match.recipient} opened your email${match.total_opens > 1 ? ` ${match.total_opens} times` : ''}</div>
-        <div style="color:#555;">First opened ${timeAgo(match.last_opened_at)}</div>
-      `;
+      popover.style.cssText = 'display:none;position:absolute;z-index:99999;background:#fff;border:1px solid #e0e0e0;border-radius:8px;padding:12px 16px;box-shadow:0 4px 12px rgba(0,0,0,0.15);font-size:13px;line-height:1.5;max-width:320px;bottom:100%;left:0;margin-bottom:8px;';
+      popover.innerHTML = buildPopoverHtml(matches);
       indicator.appendChild(popover);
 
       indicator.addEventListener('mouseenter', () => { popover.style.display = 'block'; });
       indicator.addEventListener('mouseleave', () => { popover.style.display = 'none'; });
     } else {
-      indicator.textContent = '✓✓';
-      indicator.style.color = '#bbb';
       indicator.title = 'Sent — not opened yet';
     }
 

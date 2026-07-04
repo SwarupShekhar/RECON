@@ -3,16 +3,28 @@ from datetime import datetime
 from pydantic import BaseModel
 
 
+class LinkIn(BaseModel):
+    url: str
+    type: str = "link"
+
+
+class LinkOut(BaseModel):
+    link_id: str
+    tracked_url: str
+
+
 class TrackRequest(BaseModel):
     sender_email: str
     recipient_email: str
     subject: str
     thread_id: str | None = None
     recipient_field: str = "to"
+    links: list[LinkIn] = []
 
 
 class TrackResponse(BaseModel):
     tracker_id: str
+    links: list[LinkOut] = []
 
 
 class OpenRecord(BaseModel):

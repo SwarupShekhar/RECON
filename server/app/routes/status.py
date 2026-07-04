@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth import require_api_key
 from ..database import get_db
 from ..models import Email, Open
 from ..schemas import OpenRecord, StatusResponse, ThreadStatus
@@ -9,7 +10,7 @@ from ..schemas import OpenRecord, StatusResponse, ThreadStatus
 router = APIRouter()
 
 
-@router.get("/status", response_model=StatusResponse)
+@router.get("/status", response_model=StatusResponse, dependencies=[Depends(require_api_key)])
 async def get_status(
     thread_ids: list[str] = Query(..., alias="thread_ids"),
     sender_email: str | None = Query(None),

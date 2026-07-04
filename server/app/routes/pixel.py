@@ -1,9 +1,12 @@
+import asyncio
+
 from fastapi import APIRouter, Depends, Request, Response
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
 from ..models import Email, Open
+from ..notify import maybe_alert_open
 
 router = APIRouter()
 
@@ -44,6 +47,17 @@ async def log_open(
         )
         db.add(open_row)
         await db.commit()
+        await db.refresh(open_row)
+
+        try:
+            count_result = await db.execute(
+                select(func.count(Open.id)).where(Open.email_id == tracker_id)
+            )
+            total_opens = count_result.scalar() or 1
+            # Fire-and-forget: never let a Slack hiccup slow down or fail the pixel response.
+            asyncio.create_task(maybe_alert_open(email, open_row, total_opens))
+        except Exception:
+            pass
 
     return Response(
         content=PIXEL_GIF,

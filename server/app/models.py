@@ -40,3 +40,28 @@ class Open(Base):
     verified: Mapped[bool] = mapped_column(Boolean, default=True)
 
     email: Mapped["Email"] = relationship(back_populates="opens")
+
+
+class Link(Base):
+    __tablename__ = "links"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=gen_uuid)
+    email_id: Mapped[str] = mapped_column(String(36), ForeignKey("emails.id"), index=True)
+    original_url: Mapped[str] = mapped_column(Text)
+    link_type: Mapped[str] = mapped_column(String(10), default="link")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    clicks: Mapped[list["LinkClick"]] = relationship(back_populates="link", cascade="all, delete-orphan")
+
+
+class LinkClick(Base):
+    __tablename__ = "link_clicks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    link_id: Mapped[str] = mapped_column(String(36), ForeignKey("links.id"), index=True)
+    clicked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    user_agent: Mapped[str | None] = mapped_column(Text)
+    ip: Mapped[str | None] = mapped_column(String(45))
+    verified: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    link: Mapped["Link"] = relationship(back_populates="clicks")
