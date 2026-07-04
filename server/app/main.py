@@ -17,7 +17,7 @@ from .database import Base, engine, get_db, async_session
 from .models import Email, Link, LinkClick, Open
 from .notify import post_slack
 from .reports import build_report
-from .routes import links, pixel, reports, status, track
+from .routes import links, mute, pixel, reports, status, track
 
 scheduler = AsyncIOScheduler()
 
@@ -66,6 +66,11 @@ async def lifespan(app: FastAPI):
             await conn.execute(text("ALTER TABLE emails ADD COLUMN IF NOT EXISTS recipient_field VARCHAR(10) DEFAULT 'to'"))
         except Exception:
             pass
+        try:
+            await conn.execute(text("ALTER TABLE opens ADD COLUMN IF NOT EXISTS internal BOOLEAN DEFAULT FALSE"))
+            await conn.execute(text("ALTER TABLE link_clicks ADD COLUMN IF NOT EXISTS internal BOOLEAN DEFAULT FALSE"))
+        except Exception:
+            pass
 
     scheduler.add_job(_weekly_report_job, CronTrigger(day_of_week="mon", hour=9, minute=0))
     scheduler.add_job(_monthly_report_job, CronTrigger(day="1", hour=9, minute=0))
@@ -95,6 +100,7 @@ app.include_router(pixel.router)
 app.include_router(status.router)
 app.include_router(links.router)
 app.include_router(reports.router)
+app.include_router(mute.router)
 
 
 @app.get("/", include_in_schema=False)
@@ -117,17 +123,22 @@ async def debug_emails(db: AsyncSession = Depends(get_db)):
     output = []
     for e in emails:
         opens_result = await db.execute(
-            select(func.count(Open.id)).where(Open.email_id == e.id)
+            select(func.count(Open.id)).where(Open.email_id == e.id, Open.internal == False)
         )
         total_opens = opens_result.scalar() or 0
 
         verified_result = await db.execute(
-            select(func.count(Open.id)).where(Open.email_id == e.id, Open.verified == True)
+            select(func.count(Open.id)).where(
+                Open.email_id == e.id, Open.verified == True, Open.internal == False
+            )
         )
         verified_opens = verified_result.scalar() or 0
 
         last_result = await db.execute(
-            select(Open.opened_at).where(Open.email_id == e.id).order_by(Open.opened_at.desc()).limit(1)
+            select(Open.opened_at)
+            .where(Open.email_id == e.id, Open.internal == False)
+            .order_by(Open.opened_at.desc())
+            .limit(1)
         )
         last_opened = last_result.scalar()
 
@@ -156,8 +167,8 @@ async def get_sent_status(
     stmt = (
         select(
             Email,
-            func.count(Open.id).label("total_opens"),
-            func.count(Open.id).filter(Open.verified == True).label("verified_opens"),
+            func.count(Open.id).filter(Open.internal == False).label("total_opens"),
+            func.count(Open.id).filter(Open.verified == True, Open.internal == False).label("verified_opens"),
         )
         .outerjoin(Open, Email.id == Open.email_id)
         .where(Email.sender_email == sender_email)
@@ -171,7 +182,10 @@ async def get_sent_status(
     output = []
     for email, total_opens, verified_opens in rows:
         last_result = await db.execute(
-            select(Open.opened_at).where(Open.email_id == email.id).order_by(Open.opened_at.desc()).limit(1)
+            select(Open.opened_at)
+            .where(Open.email_id == email.id, Open.internal == False)
+            .order_by(Open.opened_at.desc())
+            .limit(1)
         )
         last_opened = last_result.scalar()
 
@@ -183,12 +197,16 @@ async def get_sent_status(
         links_out = []
         for link in link_rows:
             clicks_count_result = await db.execute(
-                select(func.count(LinkClick.id)).where(LinkClick.link_id == link.id)
+                select(func.count(LinkClick.id)).where(
+                    LinkClick.link_id == link.id, LinkClick.internal == False
+                )
             )
             clicks = clicks_count_result.scalar() or 0
 
             last_click_result = await db.execute(
-                select(func.max(LinkClick.clicked_at)).where(LinkClick.link_id == link.id)
+                select(func.max(LinkClick.clicked_at)).where(
+                    LinkClick.link_id == link.id, LinkClick.internal == False
+                )
             )
             last_clicked_at = last_click_result.scalar()
 

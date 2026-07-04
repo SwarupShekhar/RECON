@@ -35,6 +35,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === "mute") {
+    const { serverUrl, threadId, seconds } = msg;
+    fetch(`${serverUrl}/mute`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ thread_id: threadId, seconds: seconds || 30 }),
+    })
+      .then(() => sendResponse({ ok: true }))
+      .catch((err) => {
+        console.warn("[Recon] Mute error:", err);
+        sendResponse({ ok: false, error: err.message });
+      });
+    return true;
+  }
+
   if (msg.type === "fetch") {
     const { serverUrl, path } = msg;
     fetch(`${serverUrl}${path}`)

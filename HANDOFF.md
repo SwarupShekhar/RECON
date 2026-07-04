@@ -49,6 +49,7 @@ Email open tracking tool — Mailsuite replacement. Chrome extension + FastAPI b
 | `/status/sent?sender_email=X` | GET | All tracked emails for a sender incl. per-email `links[]` (clicks, last_clicked_at). Auth-gated if `API_KEY` set. |
 | `/reports/weekly?sender_email=` | GET | HTML report, last 7 days. Auth-gated if `API_KEY` set. |
 | `/reports/monthly?sender_email=` | GET | HTML report, last 30 days. Auth-gated if `API_KEY` set. |
+| `/mute` | POST | body `{thread_id, seconds=30}` — suppress opens/clicks on a thread for N seconds (self-tracking). Never gated (called by extension pre-auth, same trust model as `/track`). |
 | `/debug/emails` | GET | All emails with open counts (debug). Auth-gated if `API_KEY` set. |
 | `/health` | GET | Health check |
 | `/` | GET | Redirects to /docs |
@@ -57,9 +58,16 @@ Auth gate is a no-op unless `API_KEY` env var is set (backward compatible defaul
 
 ## DB Schema
 **emails**: id(uuid), sender_email, recipient_email, recipient_field(to/cc/bcc), subject, thread_id, created_at
-**opens**: id(int), email_id(fk), opened_at, user_agent, ip, verified(bool)
+**opens**: id(int), email_id(fk), opened_at, user_agent, ip, verified(bool), internal(bool)
 **links**: id(uuid), email_id(fk), original_url, link_type(link/pdf), created_at
-**link_clicks**: id(int), link_id(fk), clicked_at, user_agent, ip, verified(bool)
+**link_clicks**: id(int), link_id(fk), clicked_at, user_agent, ip, verified(bool), internal(bool)
+**pixel_mutes**: thread_id(pk), muted_until — short-lived self-tracking suppression window
+
+## Self-Tracking Suppression (Phase 5)
+- Problem: a rep opening their own Sent copy of a tracked email fires the same pixel fetch(es) as a real recipient open — inflates counts, triggers false alerts. Worse: a single compose body embeds one pixel per recipient, so opening your own copy of a group send can fire ALL of those recipients' pixels at once.
+- Fix: extension calls `POST /mute {thread_id, seconds:30}` right before it expects Gmail to render the sender's own copy of a tracked thread — either (a) on click into a matched Sent-list row (before navigation, so the mute lands ahead of the pixel fetch), or (b) as a fallback the moment `injectThreadCheckmark` detects an already-open tracked thread (covers direct nav/refresh, but can race the pixel fetch that already happened on render — known imperfection).
+- Server: `/t/:id/pixel.gif` and `/l/:id` check `PixelMute` by the email's `thread_id` (not tracker_id, since mute must cover every recipient's pixel sharing that thread) and stamp `internal=true` on the `Open`/`LinkClick` row instead of dropping it — kept for audit, excluded from `total_opens`/`verified_opens`/`last_opened_at`/link click counts in `/status` and `/status/sent`, and skipped for Slack/desktop alerts.
+- Known gap: brand-new sends have `thread_id=null` until Gmail assigns one (see Known Issues #4) — self-opens on a not-yet-threaded send can't be muted.
 
 ## Alerts & Reports
 - Set `SLACK_WEBHOOK_URL` in `.env` to get instant Slack pings on open/link-click. Unset = logs to console only, no crash.
@@ -102,10 +110,10 @@ cloudflared tunnel --url http://127.0.0.1:8000 --protocol http2
 5. **Checkmarks DOM selectors** — Gmail changes DOM frequently. Current selectors: `tr.zA, div[role="listitem"], tr[jscontroller]`. May need updates. List-row thread-id extraction (`getThreadIdFromRow`) is best-effort/unverified against live Gmail DOM — degrades to fuzzy fallback if it can't find one.
 6. **Schedule-send button detection unverified live** — selector/text-matching for Gmail's "Schedule send" confirm dialog is best-effort, needs a real Gmail smoke test.
 7. **Slack webhook / scheduler cron untested live** — verified via code review + console-log no-op path only, no `SLACK_WEBHOOK_URL` configured in dev. Configure it and trigger a pixel/link hit to confirm.
-8. **No self-tracking suppression yet** — a rep's own opens (viewing Sent folder) still count as real opens, inflating counts.
+8. ~~No self-tracking suppression~~ — DONE, see "Self-Tracking Suppression" section above. Live-Gmail click-to-mute timing (row click vs. Gmail's own pixel fetch) still unverified against a real Gmail tab.
 
 ## Next Phases (PRD)
-- **Phase 5**: Self-tracking suppression (don't count own opens)
+- ~~**Phase 5**: Self-tracking suppression~~ — DONE
 - **Phase 6**: ~~Link click tracking + PDF open tracking~~ — DONE (link-based; true attachment tracking not feasible, see Link & "PDF" Click Tracking above)
 - **Phase 7**: ~~Instant open alerts~~ — DONE (Slack webhook + desktop notifications)
 - **Phase 8**: Team dashboard + analytics — partially done (weekly/monthly HTML reports); full dashboard still open

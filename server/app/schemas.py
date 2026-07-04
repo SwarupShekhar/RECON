@@ -27,9 +27,15 @@ class TrackResponse(BaseModel):
     links: list[LinkOut] = []
 
 
+class MuteRequest(BaseModel):
+    thread_id: str
+    seconds: int = 30
+
+
 class OpenRecord(BaseModel):
     opened_at: datetime
     verified: bool
+    internal: bool = False
 
 
 class ThreadStatus(BaseModel):

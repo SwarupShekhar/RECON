@@ -30,7 +30,10 @@ async def get_status(
         )
         opens = opens_result.scalars().all()
 
-        verified_count = sum(1 for o in opens if o.verified)
+        # Internal (self-tracking-muted) opens stay in the raw `opens` list
+        # for visibility, but are excluded from the aggregate counts.
+        external_opens = [o for o in opens if not o.internal]
+        verified_count = sum(1 for o in external_opens if o.verified)
 
         threads.append(
             ThreadStatus(
@@ -39,10 +42,13 @@ async def get_status(
                 recipient_email=email.recipient_email,
                 recipient_field=getattr(email, "recipient_field", "to"),
                 subject=email.subject,
-                total_opens=len(opens),
+                total_opens=len(external_opens),
                 verified_opens=verified_count,
-                last_opened_at=opens[-1].opened_at if opens else None,
-                opens=[OpenRecord(opened_at=o.opened_at, verified=o.verified) for o in opens],
+                last_opened_at=external_opens[-1].opened_at if external_opens else None,
+                opens=[
+                    OpenRecord(opened_at=o.opened_at, verified=o.verified, internal=o.internal)
+                    for o in opens
+                ],
             )
         )
 

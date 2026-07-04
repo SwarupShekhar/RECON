@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Recon",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Email intelligence — open tracking for Gmail",
   "permissions": ["activeTab", "storage", "scripting", "alarms", "notifications"],
   "host_permissions": [

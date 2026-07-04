@@ -75,8 +75,9 @@ Team uses Mailsuite (paid, per-seat) to track lead email opens on business domai
 ### IN PROGRESS
 - **Deployment:** Cloudflare Tunnel (`*.trycloudflare.com`) for HTTPS during dev. Production deploy to Vultr + real domain pending.
 
+- **Phase 5:** ~~Self-tracking suppression.~~ — DONE (thread_id-keyed mute window, `internal` flag on opens/clicks)
+
 ### TODO
-- **Phase 5:** Self-tracking suppression (don't count own opens). — TODO
 - **Phase 6:** ~~Link click tracking + PDF open tracking.~~ — DONE
 - **Phase 7:** ~~Instant open alerts (desktop push / Slack).~~ — DONE
 - **Phase 8:** Team dashboard + analytics. — PARTIAL (weekly/monthly reports done, full dashboard TODO)
@@ -131,7 +132,7 @@ Mailsuite charges per-seat for basic open tracking. Recon is self-owned, per-tea
 - [x] Phase 2: Chrome extension send interception + pixel injection — DONE
 - [x] Phase 4: Apple MPP detection — DONE
 - [x] Phase 3: Sent view checkmarks — DONE (thread_id-based matching + per-recipient breakdown; list-row DOM selectors still best-effort, see Known Issues in HANDOFF.md)
-- [ ] Phase 5: Self-tracking suppression
+- [x] Phase 5: Self-tracking suppression — DONE
 - [x] Phase 6: Link click tracking — DONE (link-based, see PDF caveat above)
 - [x] Phase 7: Instant open alerts — DONE (Slack + desktop)
 - [~] Phase 8: Analytics dashboard + reports — PARTIAL (weekly/monthly HTML reports done; full team dashboard still open)

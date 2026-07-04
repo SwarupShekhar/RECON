@@ -38,8 +38,21 @@ class Open(Base):
     user_agent: Mapped[str | None] = mapped_column(Text)
     ip: Mapped[str | None] = mapped_column(String(45))
     verified: Mapped[bool] = mapped_column(Boolean, default=True)
+    internal: Mapped[bool] = mapped_column(Boolean, default=False)
 
     email: Mapped["Email"] = relationship(back_populates="opens")
+
+
+class PixelMute(Base):
+    """Short-lived per-thread suppression window. Set by the extension right
+    before it renders a sender's own Sent-view copy of a tracked email, so the
+    resulting pixel fetch(es) — one per recipient sharing that thread — get
+    flagged internal instead of counted as a real open."""
+
+    __tablename__ = "pixel_mutes"
+
+    thread_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    muted_until: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class Link(Base):
@@ -63,5 +76,6 @@ class LinkClick(Base):
     user_agent: Mapped[str | None] = mapped_column(Text)
     ip: Mapped[str | None] = mapped_column(String(45))
     verified: Mapped[bool] = mapped_column(Boolean, default=True)
+    internal: Mapped[bool] = mapped_column(Boolean, default=False)
 
     link: Mapped["Link"] = relationship(back_populates="clicks")

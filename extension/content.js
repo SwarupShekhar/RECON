@@ -14,6 +14,24 @@
     if (changes.senderEmail) config.senderEmail = changes.senderEmail.newValue;
   });
 
+  // ---- Phase 5: Self-tracking suppression ----
+  //
+  // Fires right before the sender is about to render their own Sent-view
+  // copy of a tracked thread, so the pixel fetch(es) that follow get
+  // flagged internal server-side instead of counted as a real open. Muted
+  // once per thread_id per page lifetime — server-side window (30s) covers
+  // render + read time, re-muting on every poll isn't needed.
+  const mutedThreadIds = new Set();
+
+  function muteThread(threadId) {
+    if (!threadId || !config.serverUrl || mutedThreadIds.has(threadId)) return;
+    mutedThreadIds.add(threadId);
+    chrome.runtime.sendMessage(
+      { type: "mute", serverUrl: config.serverUrl, threadId, seconds: 30 },
+      () => void chrome.runtime.lastError // fire-and-forget, ignore result
+    );
+  }
+
   // `links` (optional) is an array of {url, type} for link/PDF click tracking
   // (Phase 6). See collectTrackableLinks() below — only passed on ONE
   // recipient's createTracker call per send since the compose body/its links
@@ -625,6 +643,16 @@
 
       row._reconDone = true; // match found and about to render — permanently done
       renderRowIndicator(row, matches);
+
+      // Self-tracking suppression: clicking into this row is what triggers
+      // Gmail to render the Sent-view copy (and fetch its pixel(s)). Mute
+      // the thread(s) here, before navigation, so the mute is in place
+      // ahead of the pixel fetch rather than racing it.
+      if (!row._reconClickBound) {
+        row._reconClickBound = true;
+        const rowThreadIds = [...new Set(matches.map((m) => m.thread_id).filter(Boolean))];
+        row.addEventListener("click", () => rowThreadIds.forEach(muteThread), true);
+      }
     }
   }
 
@@ -704,6 +732,13 @@
     const threadId = extractThreadIdFromHash(hash);
     const matches = getMatchesForContext(sentData, threadId, recipientEmail, subject);
     if (matches.length === 0) return;
+
+    // Fallback self-tracking suppression for direct navigation/refresh into
+    // an already-open tracked thread (the click-based mute in
+    // injectSentCheckmarks won't have fired in that case). Late relative to
+    // the pixel fetch that already happened on this render, but still
+    // suppresses any repeat fetch within the window — known imperfection.
+    if (threadId) muteThread(threadId);
 
     const status = computeOverallStatus(matches);
     const indicator = document.createElement('span');
