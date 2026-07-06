@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
 from ..models import Email, Link, LinkClick
-from ..notify import maybe_alert_click
+from ..notify import maybe_alert_click, webhook_for_email
 from .pixel import is_apple_mpp, is_thread_muted
 
 router = APIRouter()
@@ -47,7 +47,10 @@ async def follow_link(
     await db.refresh(click_row)
 
     if email and not internal:
-        # Fire-and-forget so the redirect isn't delayed by the Slack call.
-        asyncio.create_task(maybe_alert_click(email, link, click_row))
+        webhook_url = await webhook_for_email(db, email)
+        if webhook_url:
+            asyncio.create_task(
+                maybe_alert_click(email, link, click_row, webhook_url=webhook_url)
+            )
 
     return RedirectResponse(url=link.original_url, status_code=302)

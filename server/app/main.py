@@ -1,20 +1,26 @@
+import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
-from fastapi import FastAPI, Depends, Query
+from fastapi import Depends, FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
-from sqlalchemy import select, func, text
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-from .auth import require_api_key
-from .database import Base, engine, get_db, async_session
-from .models import Email, Link, LinkClick, Open
+from .auth import resolve_sender_email
+from .database import Base, async_session, engine, get_db
+from .models import Email, Link, LinkClick, Open, User
 from .notify import post_slack
 from .reports import build_report
 from .routes import links, mute, pixel, reports, status, track
@@ -23,18 +29,24 @@ scheduler = AsyncIOScheduler()
 
 
 async def _send_periodic_report(period_label: str, days: int) -> None:
-    import os
-
-    if not os.environ.get("SLACK_WEBHOOK_URL", "").strip():
-        print(f"[scheduler] SLACK_WEBHOOK_URL not set, skipping {period_label} report")
-        return
-
     since = datetime.now(timezone.utc) - timedelta(days=days)
     async with async_session() as db:
         senders_result = await db.execute(select(Email.sender_email).distinct())
         senders = [row[0] for row in senders_result.all()]
 
         for sender_email in senders:
+            user_result = await db.execute(
+                select(User).where(User.email == sender_email)
+            )
+            user = user_result.scalar_one_or_none()
+            if user and not user.alerts_enabled:
+                continue
+
+            webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
+            if not webhook_url:
+                print(f"[scheduler] No team Slack webhook configured, skipping")
+                continue
+
             report_data = await build_report(db, sender_email, since)
             rows = report_data.get("senders", [])
             if not rows:
@@ -47,7 +59,7 @@ async def _send_periodic_report(period_label: str, days: int) -> None:
                 f"{r['unique_recipients_opened']} unique recipients opened, "
                 f"{r['link_clicks']} link clicks"
             )
-            await post_slack(message)
+            await post_slack(message, webhook_url=webhook_url)
 
 
 async def _weekly_report_job() -> None:
@@ -71,6 +83,10 @@ async def lifespan(app: FastAPI):
             await conn.execute(text("ALTER TABLE link_clicks ADD COLUMN IF NOT EXISTS internal BOOLEAN DEFAULT FALSE"))
         except Exception:
             pass
+        try:
+            await conn.execute(text("ALTER TABLE emails ADD COLUMN IF NOT EXISTS user_id VARCHAR(64) REFERENCES users(id)"))
+        except Exception:
+            pass
 
     scheduler.add_job(_weekly_report_job, CronTrigger(day_of_week="mon", hour=9, minute=0))
     scheduler.add_job(_monthly_report_job, CronTrigger(day="1", hour=9, minute=0))
@@ -84,7 +100,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Recon",
     description="Email intelligence API",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -95,6 +111,63 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
+
+
+# ---------------------------------------------------------------------------
+# Error handlers: HTML for dashboard, JSON for extension/API routes
+# ---------------------------------------------------------------------------
+def _api_style_response(request: Request) -> bool:
+    """Extension + JSON API calls need JSON errors, not plain-text HTML."""
+    if request.headers.get("x-api-key"):
+        return True
+    path = request.url.path
+    return path.startswith((
+        "/status", "/track", "/me", "/debug", "/reports", "/mute", "/health",
+    )) or path.startswith("/t/") or path.startswith("/l/")
+
+
+@app.exception_handler(StarletteHTTPException)
+async def custom_http_exception_handler(request: Request, exc: StarletteHTTPException):
+    if request.url.path.startswith("/dashboard"):
+        if exc.status_code == 401:
+            return RedirectResponse(url="/login", status_code=302)
+        return auth_templates.TemplateResponse(
+            "error.html", {"request": request, "detail": str(exc.detail)}, status_code=exc.status_code
+        )
+    if _api_style_response(request):
+        return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+    return HTMLResponse(content=str(exc.detail), status_code=exc.status_code)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled error on %s", request.url.path)
+    if request.url.path.startswith("/dashboard") or request.url.path == "/":
+        return auth_templates.TemplateResponse(
+            "error.html",
+            {"request": request, "detail": f"{type(exc).__name__}: {exc}"},
+            status_code=500,
+        )
+    if _api_style_response(request):
+        return JSONResponse(
+            {"detail": f"{type(exc).__name__}: {exc}"},
+            status_code=500,
+        )
+    return HTMLResponse(content="Internal Server Error", status_code=500)
+
+
+# ---------------------------------------------------------------------------
+# Dashboard + auth routes (registered first for priority)
+# ---------------------------------------------------------------------------
+from .routes.auth_routes import router as auth_router
+from .routes.auth_routes import templates as auth_templates
+
+app.include_router(auth_router)
+
+# ---------------------------------------------------------------------------
+# API routes (unchanged, some scoped to API key auth)
+# ---------------------------------------------------------------------------
 app.include_router(track.router)
 app.include_router(pixel.router)
 app.include_router(status.router)
@@ -105,7 +178,7 @@ app.include_router(mute.router)
 
 @app.get("/", include_in_schema=False)
 async def root():
-    return RedirectResponse(url="/docs")
+    return RedirectResponse(url="/dashboard")
 
 
 @app.get("/health")
@@ -113,10 +186,19 @@ async def health():
     return {"status": "ok"}
 
 
-@app.get("/debug/emails", dependencies=[Depends(require_api_key)])
-async def debug_emails(db: AsyncSession = Depends(get_db)):
+# ---------------------------------------------------------------------------
+# Debug + status endpoints — scoped to API key auth
+# ---------------------------------------------------------------------------
+@app.get("/debug/emails")
+async def debug_emails(
+    sender_email: str = Depends(resolve_sender_email),
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(
-        select(Email).order_by(Email.created_at.desc()).limit(20)
+        select(Email)
+        .where(Email.sender_email == sender_email)
+        .order_by(Email.created_at.desc())
+        .limit(20)
     )
     emails = result.scalars().all()
 
@@ -158,9 +240,9 @@ async def debug_emails(db: AsyncSession = Depends(get_db)):
     return output
 
 
-@app.get("/status/sent", dependencies=[Depends(require_api_key)])
+@app.get("/status/sent")
 async def get_sent_status(
-    sender_email: str = Query(...),
+    sender_email: str = Depends(resolve_sender_email),
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
 ):
@@ -178,44 +260,50 @@ async def get_sent_status(
     )
     result = await db.execute(stmt)
     rows = result.all()
+    email_ids = [email.id for email, _, _ in rows]
+
+    last_opened_map: dict = {}
+    if email_ids:
+        last_opened_result = await db.execute(
+            select(Open.email_id, func.max(Open.opened_at))
+            .where(Open.email_id.in_(email_ids), Open.internal == False)
+            .group_by(Open.email_id)
+        )
+        last_opened_map = dict(last_opened_result.all())
+
+    links_by_email: dict = {}
+    if email_ids:
+        links_result = await db.execute(
+            select(Link).where(Link.email_id.in_(email_ids)).order_by(Link.created_at)
+        )
+        for link in links_result.scalars().all():
+            links_by_email.setdefault(link.email_id, []).append(link)
+
+    link_ids = [link.id for links in links_by_email.values() for link in links]
+    clicks_map: dict = {}
+    last_click_map: dict = {}
+    if link_ids:
+        clicks_result = await db.execute(
+            select(LinkClick.link_id, func.count(LinkClick.id), func.max(LinkClick.clicked_at))
+            .where(LinkClick.link_id.in_(link_ids), LinkClick.internal == False)
+            .group_by(LinkClick.link_id)
+        )
+        for link_id, count, last_clicked_at in clicks_result.all():
+            clicks_map[link_id] = count
+            last_click_map[link_id] = last_clicked_at
 
     output = []
     for email, total_opens, verified_opens in rows:
-        last_result = await db.execute(
-            select(Open.opened_at)
-            .where(Open.email_id == email.id, Open.internal == False)
-            .order_by(Open.opened_at.desc())
-            .limit(1)
-        )
-        last_opened = last_result.scalar()
-
-        links_result = await db.execute(
-            select(Link).where(Link.email_id == email.id).order_by(Link.created_at)
-        )
-        link_rows = links_result.scalars().all()
+        last_opened = last_opened_map.get(email.id)
 
         links_out = []
-        for link in link_rows:
-            clicks_count_result = await db.execute(
-                select(func.count(LinkClick.id)).where(
-                    LinkClick.link_id == link.id, LinkClick.internal == False
-                )
-            )
-            clicks = clicks_count_result.scalar() or 0
-
-            last_click_result = await db.execute(
-                select(func.max(LinkClick.clicked_at)).where(
-                    LinkClick.link_id == link.id, LinkClick.internal == False
-                )
-            )
-            last_clicked_at = last_click_result.scalar()
-
+        for link in links_by_email.get(email.id, []):
             links_out.append({
                 "link_id": link.id,
                 "url": link.original_url,
                 "type": link.link_type,
-                "clicks": clicks,
-                "last_clicked_at": str(last_clicked_at) if last_clicked_at else None,
+                "clicks": clicks_map.get(link.id, 0),
+                "last_clicked_at": str(last_click_map.get(link.id)) if last_click_map.get(link.id) else None,
             })
 
         output.append({

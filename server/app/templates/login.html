@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Recon &mdash; Sign in</title>
+  <link rel="icon" type="image/png" href="/static/reconlogo.png">
+  <style>
+    :root {
+      --bg: oklch(97.5% 0.004 150);
+      --surface: oklch(99.3% 0.003 150);
+      --border: oklch(90% 0.006 150);
+      --text: oklch(22% 0.012 150);
+      --muted: oklch(52% 0.012 150);
+      --accent: oklch(55% 0.135 150);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: oklch(19% 0.008 150);
+        --surface: oklch(23% 0.009 150);
+        --border: oklch(31% 0.012 150);
+        --text: oklch(93% 0.006 150);
+        --muted: oklch(66% 0.014 150);
+        --accent: oklch(72% 0.13 150);
+      }
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      background: var(--bg); color: var(--text);
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      min-height: 100vh; gap: 22px;
+    }
+    .brand-header { text-align: center; }
+    .recon-logo { position: relative; display: inline-flex; border-radius: 50%; overflow: hidden; width: 64px; height: 64px; margin-bottom: 12px; }
+    .recon-logo img { display: block; width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
+    .recon-logo-sweep {
+      position: absolute; inset: 0; border-radius: 50%; pointer-events: none;
+      background: conic-gradient(from 0deg, transparent 0deg, rgba(0, 210, 255, 0.4) 32deg, transparent 64deg);
+      animation: recon-sweep 3.5s linear infinite;
+    }
+    @keyframes recon-sweep { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) {
+      .recon-logo-sweep { animation: none; opacity: 0; }
+    }
+    .brand { font-size: 1.375rem; font-weight: 650; letter-spacing: -0.01em; margin-bottom: 4px; }
+    .subtitle { color: var(--muted); font-size: 0.8125rem; }
+    #clerk-sign-in { min-height: 280px; display: flex; align-items: center; justify-content: center; }
+    .fallback { color: var(--muted); font-size: 0.8125rem; }
+  </style>
+</head>
+<body>
+  <div class="brand-header">
+    <span class="recon-logo"><img src="/static/reconlogo.png" alt=""><span class="recon-logo-sweep" aria-hidden="true"></span></span>
+    <div class="brand">Recon</div>
+    <div class="subtitle">Email intelligence, for your own inbox</div>
+  </div>
+  <div id="clerk-sign-in"><span class="fallback">Loading sign-in&hellip;</span></div>
+
+  <script>
+    function reconInitClerk() {
+      window.Clerk.load().then(function () {
+        if (window.Clerk.user) {
+          window.location.href = "/dashboard";
+          return;
+        }
+        document.getElementById("clerk-sign-in").innerHTML = "";
+        window.Clerk.mountSignIn(document.getElementById("clerk-sign-in"), {
+          afterSignInUrl: "/dashboard",
+          afterSignUpUrl: "/dashboard"
+        });
+      });
+    }
+  </script>
+  <script
+    async
+    crossorigin="anonymous"
+    data-clerk-publishable-key="{{ clerk_publishable_key }}"
+    src="https://{{ clerk_frontend_api }}/npm/@clerk/clerk-js@5/dist/clerk.browser.js"
+    onload="reconInitClerk()"
+  ></script>
+</body>
+</html>

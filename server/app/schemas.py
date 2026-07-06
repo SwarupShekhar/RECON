@@ -4,6 +4,7 @@ from pydantic import BaseModel
 
 
 class LinkIn(BaseModel):
+    id: str | None = None
     url: str
     type: str = "link"
 
@@ -13,13 +14,20 @@ class LinkOut(BaseModel):
     tracked_url: str
 
 
+class RecipientIn(BaseModel):
+    email: str
+    field: str = "to"
+
+
 class TrackRequest(BaseModel):
+    id: str | None = None
     sender_email: str
     recipient_email: str
     subject: str
     thread_id: str | None = None
     recipient_field: str = "to"
     links: list[LinkIn] = []
+    all_recipients: list[RecipientIn] = []
 
 
 class TrackResponse(BaseModel):
@@ -28,7 +36,8 @@ class TrackResponse(BaseModel):
 
 
 class MuteRequest(BaseModel):
-    thread_id: str
+    thread_id: str | None = None
+    email_ids: list[str] = []
     seconds: int = 30
 
 

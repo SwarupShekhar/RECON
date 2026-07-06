@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% set active = "setup" %}
+{% block title %}Recon &mdash; Setup{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Setup Guide</h1>
+  <span class="page-subtitle">Install the extension &amp; connect Gmail</span>
+</div>
+
+<div class="setup-hero mb-24">
+  <p class="text-muted">One-time setup takes about 5 minutes. You need Google Chrome and a Gmail account.</p>
+  <a href="/dashboard/extension/download" class="btn btn-primary">Download Recon Extension (.zip)</a>
+</div>
+
+<ol class="setup-steps">
+  <li class="setup-step">
+    <div class="setup-step-title">Download the extension</div>
+    <p class="text-muted">Click the button above. Unzip the file — you should get a folder called <code>recon-extension</code>.</p>
+  </li>
+
+  <li class="setup-step">
+    <div class="setup-step-title">Load it in Chrome</div>
+    <p class="text-muted">Open <code>chrome://extensions</code> in Chrome.</p>
+    <ul class="setup-sublist text-muted">
+      <li>Turn on <strong>Developer mode</strong> (top-right toggle)</li>
+      <li>Click <strong>Load unpacked</strong></li>
+      <li>Select the <code>recon-extension</code> folder you unzipped</li>
+      <li>Pin the Recon icon in your Chrome toolbar</li>
+    </ul>
+    <img
+      class="setup-screenshot"
+      src="https://res.cloudinary.com/de8vvmpip/image/upload/v1783328924/Screenshot_2026-07-06_at_2.37.52_PM_myspld.png"
+      alt="Chrome Extensions page with Developer mode toggle in the top-right corner"
+      loading="lazy"
+    >
+    <p class="setup-screenshot-caption">Developer mode is the toggle in the top-right. Then use <strong>Load unpacked</strong> on the left.</p>
+  </li>
+
+  <li class="setup-step">
+    <div class="setup-step-title">Generate your API key</div>
+    <p class="text-muted">Each person gets their own key — do not share yours.</p>
+    <a href="/dashboard/extension-key" class="btn btn-secondary" style="margin-top:8px;">Go to Extension Key →</a>
+  </li>
+
+  <li class="setup-step">
+    <div class="setup-step-title">Configure the extension popup</div>
+    <p class="text-muted">Click the Recon icon in Chrome. The <strong>API Server URL is already filled in</strong> — you only need to paste your API key from step 3.</p>
+    <div class="setup-copy-block">
+      <div><span class="text-muted">API Server URL</span> <span class="badge badge-accent">pre-filled</span><br><code>{{ base_url }}</code></div>
+      <div style="margin-top:10px;"><span class="text-muted">API Key</span><br><code>paste from Extension Key page</code></div>
+    </div>
+    <p class="text-muted" style="margin-top:10px;">Click <strong>Save</strong>. You should see “Logged in as {{ user.email }}”.</p>
+  </li>
+
+  <li class="setup-step">
+    <div class="setup-step-title">Send a test email</div>
+    <ul class="setup-sublist text-muted">
+      <li>Open <a href="https://mail.google.com" target="_blank" rel="noopener">Gmail</a> and compose a new email</li>
+      <li>Send to an <strong>external</strong> address (not your own inbox)</li>
+      <li>Have the recipient open it</li>
+      <li>Check the <a href="/dashboard">dashboard</a> (hit Refresh) or Gmail Sent checkmarks</li>
+    </ul>
+  </li>
+</ol>
+
+<div class="setup-note">
+  <strong>Server URL for your team:</strong> <code>{{ base_url }}</code><br>
+  <span class="text-muted">If this URL changes (tunnel restart), update the API Server URL in the extension popup.</span>
+</div>
+{% endblock %}

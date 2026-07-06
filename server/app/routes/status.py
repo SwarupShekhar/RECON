@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..auth import require_api_key
+from ..auth import resolve_sender_email
 from ..database import get_db
 from ..models import Email, Open
 from ..schemas import OpenRecord, StatusResponse, ThreadStatus
@@ -10,15 +10,16 @@ from ..schemas import OpenRecord, StatusResponse, ThreadStatus
 router = APIRouter()
 
 
-@router.get("/status", response_model=StatusResponse, dependencies=[Depends(require_api_key)])
+@router.get("/status", response_model=StatusResponse)
 async def get_status(
     thread_ids: list[str] = Query(..., alias="thread_ids"),
-    sender_email: str | None = Query(None),
+    sender_email: str = Depends(resolve_sender_email),
     db: AsyncSession = Depends(get_db),
 ):
-    stmt = select(Email).where(Email.thread_id.in_(thread_ids))
-    if sender_email:
-        stmt = stmt.where(Email.sender_email == sender_email)
+    stmt = (
+        select(Email)
+        .where(Email.thread_id.in_(thread_ids), Email.sender_email == sender_email)
+    )
 
     result = await db.execute(stmt)
     emails = result.scalars().all()
@@ -30,8 +31,6 @@ async def get_status(
         )
         opens = opens_result.scalars().all()
 
-        # Internal (self-tracking-muted) opens stay in the raw `opens` list
-        # for visibility, but are excluded from the aggregate counts.
         external_opens = [o for o in opens if not o.internal]
         verified_count = sum(1 for o in external_opens if o.verified)
 

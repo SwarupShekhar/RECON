@@ -1,3 +1,5 @@
+import json
+
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,12 +13,17 @@ router = APIRouter()
 
 @router.post("/track", response_model=TrackResponse)
 async def create_tracker(req: TrackRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    all_recipients_json = (
+        json.dumps([r.model_dump() for r in req.all_recipients]) if req.all_recipients else None
+    )
     email = Email(
         sender_email=req.sender_email,
         recipient_email=req.recipient_email,
         recipient_field=req.recipient_field,
         subject=req.subject,
         thread_id=req.thread_id,
+        all_recipients=all_recipients_json,
+        **({"id": req.id} if req.id else {}),
     )
     db.add(email)
     await db.commit()
@@ -25,7 +32,12 @@ async def create_tracker(req: TrackRequest, request: Request, db: AsyncSession =
     links_out: list[LinkOut] = []
     if req.links:
         link_rows = [
-            Link(email_id=email.id, original_url=item.url, link_type=item.type)
+            Link(
+                email_id=email.id,
+                original_url=item.url,
+                link_type=item.type,
+                **({"id": item.id} if item.id else {}),
+            )
             for item in req.links
         ]
         db.add_all(link_rows)

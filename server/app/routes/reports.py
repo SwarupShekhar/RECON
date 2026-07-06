@@ -4,16 +4,16 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..auth import require_api_key
+from ..auth import resolve_sender_email
 from ..database import get_db
 from ..reports import build_report, render_report_html
 
-router = APIRouter(dependencies=[Depends(require_api_key)])
+router = APIRouter()
 
 
 @router.get("/reports/weekly", response_class=HTMLResponse)
 async def weekly_report(
-    sender_email: str | None = Query(None),
+    sender_email: str = Depends(resolve_sender_email),
     db: AsyncSession = Depends(get_db),
 ):
     since = datetime.now(timezone.utc) - timedelta(days=7)
@@ -23,7 +23,7 @@ async def weekly_report(
 
 @router.get("/reports/monthly", response_class=HTMLResponse)
 async def monthly_report(
-    sender_email: str | None = Query(None),
+    sender_email: str = Depends(resolve_sender_email),
     db: AsyncSession = Depends(get_db),
 ):
     since = datetime.now(timezone.utc) - timedelta(days=30)

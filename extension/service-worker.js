@@ -36,11 +36,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "mute") {
-    const { serverUrl, threadId, seconds } = msg;
+    const { serverUrl, threadId, emailIds, seconds } = msg;
     fetch(`${serverUrl}/mute`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ thread_id: threadId, seconds: seconds || 30 }),
+      body: JSON.stringify({ thread_id: threadId || null, email_ids: emailIds || [], seconds: seconds || 30 }),
     })
       .then(() => sendResponse({ ok: true }))
       .catch((err) => {
@@ -51,10 +51,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "fetch") {
-    const { serverUrl, path } = msg;
-    fetch(`${serverUrl}${path}`)
-      .then((r) => r.json())
-      .then((data) => sendResponse({ ok: true, data }))
+    const { serverUrl, path, headers } = msg;
+    fetch(`${serverUrl}${path}`, { headers: headers || {} })
+      .then(async (r) => {
+        const text = await r.text();
+        let data = null;
+        try {
+          data = text ? JSON.parse(text) : null;
+        } catch {
+          data = { detail: text || r.statusText };
+        }
+        if (!r.ok) {
+          const detail = data?.detail || text || r.statusText;
+          sendResponse({ ok: false, status: r.status, error: detail, data });
+          return;
+        }
+        sendResponse({ ok: true, status: r.status, data });
+      })
       .catch((err) => {
         console.error("[Recon] Fetch error:", err);
         sendResponse({ ok: false, error: err.message });
@@ -94,13 +107,17 @@ function snapshotKeyFor(entry) {
 }
 
 async function checkForNewOpens() {
-  const { serverUrl, senderEmail, alertsEnabled } = await getStorageSync(["serverUrl", "senderEmail", "alertsEnabled"]);
-  if (!serverUrl || !senderEmail) return;
-  if (alertsEnabled === false) return; // default true unless explicitly disabled in popup
+  const { serverUrl, senderEmail, apiKey, alertsEnabled } = await getStorageSync(["serverUrl", "senderEmail", "apiKey", "alertsEnabled"]);
+  if (!serverUrl) return;
+  if (!apiKey && !senderEmail) return;
+  if (alertsEnabled === false) return;
+
+  const headers = apiKey ? { "X-API-Key": apiKey } : {};
+  const path = apiKey ? "/status/sent" : `/status/sent?sender_email=${encodeURIComponent(senderEmail)}`;
 
   let data;
   try {
-    const res = await fetch(`${serverUrl}/status/sent?sender_email=${encodeURIComponent(senderEmail)}`);
+    const res = await fetch(`${serverUrl}${path}`, { headers });
     data = await res.json();
   } catch (err) {
     console.warn("[Recon] Alarm fetch failed:", err.message);

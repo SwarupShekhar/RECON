@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% set active = "settings" %}
+{% block title %}Recon &mdash; Settings{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Settings</h1>
+  <span class="page-subtitle">Alerts</span>
+</div>
+
+{% if saved %}
+<div class="mb-16"><span class="badge badge-accent">Saved</span></div>
+{% endif %}
+
+<form method="post" action="/dashboard/settings" class="form-narrow">
+  <div class="form-group">
+    <label class="checkbox">
+      <input type="checkbox" name="alerts_enabled" value="true"
+             {% if user.alerts_enabled %}checked{% endif %}>
+      Enable open and click alerts for my sends
+    </label>
+    <div class="text-muted" style="margin-top:6px;">
+      Slack notifications go to the team channel configured by your admin — not a personal webhook.
+    </div>
+  </div>
+
+  <button type="submit" class="btn btn-primary">Save Settings</button>
+</form>
+{% endblock %}

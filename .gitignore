@@ -1,8 +1,67 @@
-.venv/
-__pycache__/
-*.pyc
+# --- Secrets & env (never commit) ---
 .env
+.env.*
+!.env.example
+!**/.env.example
 server/.env
-.tokensave/
+server/.env.*
 *.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+credentials/
+.secrets/
+.tokensave/
+token.json
+*.token
+
+# --- Internal docs (not for public repo) ---
+*.md
+
+# --- Python ---
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# --- Node (if added later) ---
 node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# --- OS & editors ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.cursor/
+
+# --- Logs & runtime ---
+*.log
+/tmp/
+*.pid
+
+# --- Docker local overrides ---
+docker-compose.override.yml
+.docker/
+
+# --- Local / scratch ---
+*.local
+scratch/
+backup/

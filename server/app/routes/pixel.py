@@ -6,8 +6,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
-from ..models import Email, Open, PixelMute
-from ..notify import maybe_alert_open
+from ..models import Email, EmailMute, Open, PixelMute
+from ..notify import maybe_alert_open, webhook_for_email
 
 router = APIRouter()
 
@@ -39,6 +39,16 @@ async def is_thread_muted(db: AsyncSession, thread_id: str | None) -> bool:
     return bool(mute and mute.muted_until > datetime.now(timezone.utc))
 
 
+async def is_email_muted(db: AsyncSession, email_id: str) -> bool:
+    """Same idea as is_thread_muted, but keyed by the tracker id itself. A
+    brand-new compose has no thread_id yet (Gmail assigns one only after
+    send), so thread-based muting can't cover it — this is set immediately
+    after send instead, right when the extension knows the tracker id."""
+    result = await db.execute(select(EmailMute).where(EmailMute.email_id == email_id))
+    mute = result.scalar_one_or_none()
+    return bool(mute and mute.muted_until > datetime.now(timezone.utc))
+
+
 @router.get("/t/{tracker_id}/pixel.gif")
 async def log_open(
     tracker_id: str,
@@ -52,7 +62,7 @@ async def log_open(
         user_agent = request.headers.get("user-agent")
         ip = request.headers.get("x-forwarded-for", request.client.host if request.client else None)
         verified = not is_apple_mpp(user_agent)
-        internal = await is_thread_muted(db, email.thread_id)
+        internal = await is_thread_muted(db, email.thread_id) or await is_email_muted(db, tracker_id)
 
         open_row = Open(
             email_id=tracker_id,
@@ -71,8 +81,11 @@ async def log_open(
                     select(func.count(Open.id)).where(Open.email_id == tracker_id, Open.internal == False)
                 )
                 total_opens = count_result.scalar() or 1
-                # Fire-and-forget: never let a Slack hiccup slow down or fail the pixel response.
-                asyncio.create_task(maybe_alert_open(email, open_row, total_opens))
+                webhook_url = await webhook_for_email(db, email)
+                if webhook_url:
+                    asyncio.create_task(
+                        maybe_alert_open(email, open_row, total_opens, webhook_url=webhook_url)
+                    )
             except Exception:
                 pass
 

@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% set active = "dashboard" %}
+{% block title %}Recon &mdash; {{ email.subject }}{% endblock %}
+{% block content %}
+<a href="/dashboard" class="text-muted" style="text-decoration:none;">&larr; Back to Dashboard</a>
+
+<h1 style="margin-top:12px;">{{ email.subject or "(no subject)" }}</h1>
+
+<div class="pill-row">
+  {% if verified_opens > 0 %}
+    <span class="pill pill-accent"><span class="status-dot opened" aria-hidden="true"></span> Verified open</span>
+  {% elif external_opens|length > 0 %}
+    <span class="pill pill-warn"><span class="status-dot unverified" aria-hidden="true"></span> Unverified open</span>
+  {% else %}
+    <span class="pill pill-muted"><span class="status-dot none" aria-hidden="true"></span> Not opened</span>
+  {% endif %}
+  {% if total_clicks > 0 %}
+    <span class="pill pill-accent">{{ total_clicks }} link click{{ "s" if total_clicks != 1 else "" }}</span>
+  {% endif %}
+  {% if opens|length > external_opens|length %}
+    <span class="pill pill-muted">{{ opens|length - external_opens|length }} self-open{{ "s" if (opens|length - external_opens|length) != 1 else "" }} excluded</span>
+  {% endif %}
+</div>
+
+<div class="detail-grid">
+  <div class="detail-card">
+    <div class="detail-card-label">Recipient</div>
+    <div class="detail-card-value">{{ email.recipient_email }}</div>
+  </div>
+  <div class="detail-card">
+    <div class="detail-card-label">Sent</div>
+    <div class="detail-card-value">{{ email.created_at.strftime("%b %d, %Y %H:%M UTC") if email.created_at else "—" }}</div>
+  </div>
+  <div class="detail-card">
+    <div class="detail-card-label">Opens</div>
+    <div class="detail-card-value">{{ external_opens|length }} external{% if verified_opens > 0 %} &middot; {{ verified_opens }} verified{% endif %}</div>
+  </div>
+  <div class="detail-card">
+    <div class="detail-card-label">Link clicks</div>
+    <div class="detail-card-value">{{ total_clicks }}</div>
+  </div>
+</div>
+
+<h2>Open History</h2>
+{% if opens %}
+<table class="mb-24">
+  <thead>
+    <tr><th>Opened At</th><th>Status</th><th>User Agent</th><th>IP</th></tr>
+  </thead>
+  <tbody>
+    {% for o in opens %}
+    <tr>
+      <td>{{ o.opened_at.strftime("%b %d, %Y %H:%M:%S") if o.opened_at else "—" }}</td>
+      <td>
+        {% if o.internal %}
+          <span class="badge badge-muted">Self (excluded)</span>
+        {% elif o.verified %}
+          <span class="badge badge-accent">Verified</span>
+        {% else %}
+          <span class="badge badge-muted">Unverified</span>
+        {% endif %}
+      </td>
+      <td class="text-muted" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ o.user_agent or '' }}">{{ o.user_agent or "—" }}</td>
+      <td class="text-muted">{{ o.ip or "—" }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty-state mb-24">No opens recorded yet.</div>
+{% endif %}
+
+<h2>Links &amp; Clicks</h2>
+{% if links %}
+<table>
+  <thead>
+    <tr><th>URL</th><th>Type</th><th>Clicks</th></tr>
+  </thead>
+  <tbody>
+    {% for link in links %}
+    <tr>
+      <td>
+        <div style="max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ link.original_url }}">{{ link.original_url }}</div>
+        {% if link.clicks %}
+        <div class="click-timeline">
+          {% for c in link.clicks %}
+          <div class="click-timeline-item">
+            {{ c.clicked_at.strftime("%b %d, %H:%M:%S") if c.clicked_at else "—" }}
+            {% if not c.verified %}&middot; unverified{% endif %}
+          </div>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </td>
+      <td class="text-muted">{{ link.link_type }}</td>
+      <td>{{ link.click_count }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty-state">No links tracked in this email.</div>
+{% endif %}
+{% endblock %}

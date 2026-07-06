@@ -6,9 +6,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import Email, Link, LinkClick, Open
 
-ACCENT_GREEN = "#0d9e3f"
-
-
 async def build_report(db: AsyncSession, sender_email: str | None, since: datetime) -> dict:
     """Aggregate emails/opens/links/clicks since `since`, grouped by sender_email
     unless a single sender_email is given (in which case it's a single-row report)."""
@@ -28,6 +25,7 @@ async def build_report(db: AsyncSession, sender_email: str | None, since: dateti
             {
                 "sender_email": sender,
                 "emails_sent": 0,
+                "emails_opened": 0,
                 "opens": 0,
                 "verified_opens": 0,
                 "unique_recipients_opened": set(),
@@ -47,17 +45,25 @@ async def build_report(db: AsyncSession, sender_email: str | None, since: dateti
 
     if all_email_ids:
         opens_result = await db.execute(
-            select(Open.email_id, Open.verified).where(Open.email_id.in_(all_email_ids))
+            select(Open.email_id, Open.verified).where(
+                Open.email_id.in_(all_email_ids),
+                Open.internal == False,
+            )
         )
+        emails_opened: dict[str, set[str]] = {}
         for email_id, verified in opens_result.all():
             sender = email_id_to_sender.get(email_id)
             if not sender:
                 continue
             b = bucket(sender)
             b["opens"] += 1
+            emails_opened.setdefault(sender, set()).add(email_id)
             if verified:
                 b["verified_opens"] += 1
                 b["unique_recipients_opened"].add(email_id_to_recipient.get(email_id))
+
+        for sender, opened_ids in emails_opened.items():
+            bucket(sender)["emails_opened"] = len(opened_ids)
 
         links_result = await db.execute(
             select(Link.id, Link.email_id).where(Link.email_id.in_(all_email_ids))
@@ -71,7 +77,10 @@ async def build_report(db: AsyncSession, sender_email: str | None, since: dateti
 
         if link_id_to_sender:
             clicks_result = await db.execute(
-                select(LinkClick.link_id).where(LinkClick.link_id.in_(link_id_to_sender.keys()))
+                select(LinkClick.link_id).where(
+                    LinkClick.link_id.in_(link_id_to_sender.keys()),
+                    LinkClick.internal == False,
+                )
             )
             for (link_id,) in clicks_result.all():
                 sender = link_id_to_sender.get(link_id)
@@ -84,6 +93,7 @@ async def build_report(db: AsyncSession, sender_email: str | None, since: dateti
             {
                 "sender_email": sender,
                 "emails_sent": data["emails_sent"],
+                "emails_opened": data.get("emails_opened", 0),
                 "opens": data["opens"],
                 "verified_opens": data["verified_opens"],
                 "unique_recipients_opened": len(data["unique_recipients_opened"]),
@@ -117,7 +127,7 @@ def render_report_html(report_data: dict, period_label: str) -> str:
     )
 
     if not rows:
-        row_html = '<tr><td colspan="6" style="text-align:center;color:#888;">No activity in this period.</td></tr>'
+        row_html = '<tr><td colspan="6" style="text-align:center;color:#8a8f86;">No activity in this period.</td></tr>'
 
     return f"""
 <html>
@@ -125,33 +135,36 @@ def render_report_html(report_data: dict, period_label: str) -> str:
 <meta charset="utf-8">
 <title>Recon {escape(period_label)} Report</title>
 <style>
-  body {{ font-family: -apple-system, Helvetica, Arial, sans-serif; background: #f7f7f8; color: #222; padding: 24px; }}
-  h1 {{ color: {ACCENT_GREEN}; font-size: 20px; }}
-  .meta {{ color: #666; font-size: 13px; margin-bottom: 16px; }}
-  table {{ border-collapse: collapse; width: 100%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
-  th, td {{ padding: 8px 12px; text-align: left; border-bottom: 1px solid #eee; font-size: 14px; }}
-  th {{ background: {ACCENT_GREEN}; color: #fff; font-weight: 600; }}
+  body {{ font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; background: #f8f8f6; color: #23261f; padding: 32px; font-size: 14px; }}
+  .wrap {{ max-width: 720px; margin: 0 auto; }}
+  h1 {{ font-size: 1.25rem; font-weight: 650; letter-spacing: -0.01em; margin: 0 0 4px; }}
+  .meta {{ color: #6b6f66; font-size: 0.8125rem; margin-bottom: 20px; }}
+  table {{ border-collapse: collapse; width: 100%; background: #fff; border: 1px solid #e2e4e0; border-radius: 8px; overflow: hidden; }}
+  th, td {{ padding: 9px 14px; text-align: left; border-bottom: 1px solid #e2e4e0; font-size: 0.8125rem; }}
+  th {{ color: #6b6f66; font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.02em; }}
   tr:last-child td {{ border-bottom: none; }}
 </style>
 </head>
 <body>
-  <h1>Recon &mdash; {escape(period_label)} Report</h1>
-  <div class="meta">Since {escape(since_str)}</div>
-  <table>
-    <thead>
-      <tr>
-        <th>Sender</th>
-        <th>Emails Sent</th>
-        <th>Opens</th>
-        <th>Verified Opens</th>
-        <th>Unique Recipients Opened</th>
-        <th>Link Clicks</th>
-      </tr>
-    </thead>
-    <tbody>
-      {row_html}
-    </tbody>
-  </table>
+  <div class="wrap">
+    <h1>{escape(period_label)} Report</h1>
+    <div class="meta">Since {escape(since_str)}</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Sender</th>
+          <th>Emails Sent</th>
+          <th>Opens</th>
+          <th>Verified Opens</th>
+          <th>Unique Recipients Opened</th>
+          <th>Link Clicks</th>
+        </tr>
+      </thead>
+      <tbody>
+        {row_html}
+      </tbody>
+    </table>
+  </div>
 </body>
 </html>
 """

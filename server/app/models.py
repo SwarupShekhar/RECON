@@ -15,6 +15,31 @@ def gen_uuid():
     return str(uuid.uuid4())
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)  # Clerk user id
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    slack_webhook_url: Mapped[str | None] = mapped_column(Text, default=None)
+    alerts_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    api_keys: Mapped[list["ApiKey"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+
+
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=gen_uuid)
+    user_id: Mapped[str] = mapped_column(String(64), ForeignKey("users.id"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    user: Mapped["User"] = relationship(back_populates="api_keys")
+
+
 class Email(Base):
     __tablename__ = "emails"
 
@@ -25,6 +50,8 @@ class Email(Base):
     subject: Mapped[str] = mapped_column(Text)
     thread_id: Mapped[str | None] = mapped_column(String(255), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    all_recipients: Mapped[str | None] = mapped_column(Text, default=None)
+    user_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("users.id"), index=True, default=None)
 
     opens: Mapped[list["Open"]] = relationship(back_populates="email", cascade="all, delete-orphan")
 
@@ -44,14 +71,16 @@ class Open(Base):
 
 
 class PixelMute(Base):
-    """Short-lived per-thread suppression window. Set by the extension right
-    before it renders a sender's own Sent-view copy of a tracked email, so the
-    resulting pixel fetch(es) — one per recipient sharing that thread — get
-    flagged internal instead of counted as a real open."""
-
     __tablename__ = "pixel_mutes"
 
     thread_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    muted_until: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class EmailMute(Base):
+    __tablename__ = "email_mutes"
+
+    email_id: Mapped[str] = mapped_column(String(36), ForeignKey("emails.id"), primary_key=True)
     muted_until: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 

@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% set active = "reports" %}
+{% block title %}Recon &mdash; Reports{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Reports</h1>
+  <span class="page-subtitle">Weekly &amp; monthly rollups</span>
+</div>
+
+<div id="reports-filters">
+  <div class="filter-tabs">
+    <button type="button" class="filter-tab active" data-filter="weekly">Weekly (7d)</button>
+    <button type="button" class="filter-tab" data-filter="monthly">Monthly (30d)</button>
+  </div>
+
+  <div data-report-section="weekly">
+    <h2>Weekly &mdash; last 7 days</h2>
+    {% if weekly_senders %}
+    <table class="mb-24">
+      <thead>
+        <tr>
+          <th>Sender</th>
+          <th>Sent</th>
+          <th>Emails opened</th>
+          <th>Open events</th>
+          <th>Verified events</th>
+          <th>Open rate</th>
+          <th>Recipients opened</th>
+          <th>Link clicks</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in weekly_senders %}
+        <tr>
+          <td>{{ r.sender_email }}</td>
+          <td>{{ r.emails_sent }}</td>
+          <td>{{ r.emails_opened }}</td>
+          <td>{{ r.opens }}</td>
+          <td>{{ r.verified_opens }}</td>
+          <td>
+            {% if r.emails_sent > 0 %}
+              {{ ((r.emails_opened / r.emails_sent) * 100)|round(0)|int }}%
+            {% else %}—{% endif %}
+          </td>
+          <td>{{ r.unique_recipients_opened }}</td>
+          <td>{{ r.link_clicks }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="text-muted mb-24">No activity in the past 7 days.</p>
+    {% endif %}
+  </div>
+
+  <div data-report-section="monthly" class="is-hidden">
+    <h2>Monthly &mdash; last 30 days</h2>
+    {% if monthly_senders %}
+    <table>
+      <thead>
+        <tr>
+          <th>Sender</th>
+          <th>Sent</th>
+          <th>Emails opened</th>
+          <th>Open events</th>
+          <th>Verified events</th>
+          <th>Open rate</th>
+          <th>Recipients opened</th>
+          <th>Link clicks</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in monthly_senders %}
+        <tr>
+          <td>{{ r.sender_email }}</td>
+          <td>{{ r.emails_sent }}</td>
+          <td>{{ r.emails_opened }}</td>
+          <td>{{ r.opens }}</td>
+          <td>{{ r.verified_opens }}</td>
+          <td>
+            {% if r.emails_sent > 0 %}
+              {{ ((r.emails_opened / r.emails_sent) * 100)|round(0)|int }}%
+            {% else %}—{% endif %}
+          </td>
+          <td>{{ r.unique_recipients_opened }}</td>
+          <td>{{ r.link_clicks }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="text-muted">No activity in the past 30 days.</p>
+    {% endif %}
+  </div>
+</div>
+
+<p class="text-muted" style="margin-top:16px;">
+  <strong>Emails opened</strong> matches the dashboard (unique tracked emails with at least one real open).
+  <strong>Open events</strong> counts every open, including re-opens. Self-opens are excluded everywhere.
+</p>
+{% endblock %}
+
+{% block page_scripts %}
+<script>
+(function () {
+  var container = document.getElementById("reports-filters");
+  if (!container) return;
+  var tabs = container.querySelectorAll(".filter-tab");
+  var sections = container.querySelectorAll("[data-report-section]");
+  tabs.forEach(function (tab) {
+    tab.addEventListener("click", function (e) {
+      e.preventDefault();
+      var filter = tab.getAttribute("data-filter");
+      tabs.forEach(function (t) { t.classList.toggle("active", t === tab); });
+      sections.forEach(function (section) {
+        section.classList.toggle("is-hidden", section.getAttribute("data-report-section") !== filter);
+      });
+    });
+  });
+})();
+</script>
+{% endblock %}

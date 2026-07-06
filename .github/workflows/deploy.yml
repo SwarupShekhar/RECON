@@ -1,0 +1,32 @@
+name: Deploy to Vultr
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-recon-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            APP_DIR="${{ secrets.APP_DIR || '/opt/recon' }}"
+            cd "$APP_DIR"
+            git fetch origin main
+            git reset --hard origin/main
+            docker compose build
+            docker compose up -d
+            docker image prune -f
+            curl -fsS http://127.0.0.1:4050/health

@@ -1,17 +1,30 @@
 (() => {
   "use strict";
 
-  let config = { serverUrl: "", senderEmail: "" };
+  // Gmail's SPA can re-fire tab "complete" events without a real reload,
+  // and the service worker re-injects content.js each time into the same
+  // persistent isolated world. Without this guard, old setInterval/
+  // MutationObserver instances never die and stack up — each poll cycle
+  // multiplies DB load until the connection pool exhausts.
+  if (window.__reconWatching) {
+    console.log("[Recon] Already active in this page, skipping duplicate injection.");
+    return;
+  }
+  window.__reconWatching = true;
 
-  chrome.storage.sync.get(["serverUrl", "senderEmail"], (data) => {
+  let config = { serverUrl: "", senderEmail: "", apiKey: "" };
+
+  chrome.storage.sync.get(["serverUrl", "senderEmail", "apiKey"], (data) => {
     config.serverUrl = data.serverUrl || "";
     config.senderEmail = data.senderEmail || "";
-    console.log("[Recon] Loaded config:", config.serverUrl, config.senderEmail);
+    config.apiKey = data.apiKey || "";
+    console.log("[Recon] Loaded config:", config.serverUrl, config.senderEmail ? "(email set)" : "", config.apiKey ? "(api key set)" : "");
   });
 
   chrome.storage.onChanged.addListener((changes) => {
     if (changes.serverUrl) config.serverUrl = changes.serverUrl.newValue;
     if (changes.senderEmail) config.senderEmail = changes.senderEmail.newValue;
+    if (changes.apiKey) config.apiKey = changes.apiKey.newValue;
   });
 
   // ---- Phase 5: Self-tracking suppression ----
@@ -32,19 +45,32 @@
     );
   }
 
-  // `links` (optional) is an array of {url, type} for link/PDF click tracking
-  // (Phase 6). See collectTrackableLinks() below — only passed on ONE
-  // recipient's createTracker call per send since the compose body/its links
-  // are shared across all recipients, not per-recipient.
-  //
-  // Assumption about the backend contract (server is being built in parallel
-  // — reconcile against what actually lands):
-  //   POST /track request body may include `links: [{ url, type: "link"|"pdf" }]`.
-  //   POST /track response may include `links: [{ link_id, tracked_url }]`,
-  //   in the SAME ORDER as the request array.
-  async function createTracker(recipientEmail, subject, threadId, field, links) {
+  // A brand-new compose has no thread_id yet (Gmail only assigns one after
+  // send completes), so muteThread() can't cover it. Gmail frequently
+  // re-renders the just-sent message in the sender's own tab within a few
+  // seconds of hitting Send — that fires the embedded pixel from the
+  // sender's own browser and gets misread as the recipient opening it.
+  // Mute the exact tracker ids we just created, right after send, so this
+  // covers new composes the same way muteThread covers Sent-list clicks.
+  function muteEmails(emailIds) {
+    if (!emailIds || emailIds.length === 0 || !config.serverUrl) return;
+    chrome.runtime.sendMessage(
+      { type: "mute", serverUrl: config.serverUrl, emailIds, seconds: 30 },
+      () => void chrome.runtime.lastError
+    );
+  }
+
+  // `links` (optional) is an array of {id, url, type} for link/PDF click
+  // tracking (Phase 6) — only passed on ONE recipient's call per send since
+  // the compose body/its links are shared across all recipients, not
+  // per-recipient. `id`/`trackerId` are generated client-side (see
+  // handleSend) so the pixel and link hrefs can be applied synchronously,
+  // before this call is even made — this is a true fire-and-forget
+  // registration, its timing no longer affects what gets sent.
+  async function registerTracker(trackerId, recipientEmail, subject, threadId, field, links, allRecipients) {
     return new Promise((resolve, reject) => {
       const payload = {
+        id: trackerId,
         sender_email: config.senderEmail,
         recipient_email: recipientEmail,
         subject: subject,
@@ -52,6 +78,7 @@
         recipient_field: field,
       };
       if (links && links.length > 0) payload.links = links;
+      if (allRecipients && allRecipients.length > 0) payload.all_recipients = allRecipients;
 
       chrome.runtime.sendMessage(
         {
@@ -217,26 +244,26 @@
     return links;
   }
 
-  // Rewrites each collected <a>'s href to the server-provided tracked_url,
-  // matching request/response by array index. Idempotent per body via the
-  // reconLinksDone flag.
-  function applyTrackedLinks(body, collected, trackedLinks) {
+  // Rewrites each collected <a>'s href to its pre-generated tracked_url.
+  // Client-generated (see handleSend) so this runs synchronously, before any
+  // network await — same reasoning as pixel injection below. Idempotent per
+  // body via the reconLinksDone flag.
+  function applyTrackedLinksSync(body, collected) {
     if (!body || body.dataset.reconLinksDone === "1") return;
     try {
-      trackedLinks.forEach((tl, idx) => {
-        const original = collected[idx];
-        if (!original || !original.el || !tl?.tracked_url) return;
-        original.el.setAttribute("href", tl.tracked_url);
+      collected.forEach((item) => {
+        if (!item.el || !item.trackedUrl) return;
+        item.el.setAttribute("href", item.trackedUrl);
       });
-      console.log("[Recon] Rewrote", trackedLinks.length, "link(s) to tracked URLs");
+      console.log("[Recon] Rewrote", collected.length, "link(s) to tracked URLs");
     } catch (err) {
-      console.warn("[Recon] applyTrackedLinks failed:", err);
+      console.warn("[Recon] applyTrackedLinksSync failed:", err);
     } finally {
       body.dataset.reconLinksDone = "1";
     }
   }
 
-  async function handleSend(container) {
+  function handleSend(container) {
     if (!config.serverUrl || !config.senderEmail) {
       console.warn("[Recon] No config — click extension icon to set server URL and email");
       return;
@@ -259,31 +286,50 @@
 
     console.log("[Recon] Sending to:", recipients.map(r => `${r.email} (${r.field})`).join(", "), "subject:", subject);
 
-    // Gather compose-body links ONCE — the body/its HTML is shared across
-    // all recipients in this single send, so links can't be personalized
-    // per-recipient. Attribution of any resulting clicks is therefore only
-    // to "someone in this send," not a specific recipient — known limitation.
+    // Gmail sends ONE identical HTML body to every recipient on a To/Cc
+    // send — there is no way to embed a distinct pixel per co-recipient and
+    // know which of them actually opened it (whoever opens their copy fires
+    // every embedded image indiscriminately). We used to loop and call
+    // createTracker+injectPixel per recipient anyway: injectPixel no-ops
+    // past the first call (it bails if a pixel is already in the body), so
+    // every recipient after the first got a real DB row that could never
+    // possibly register an open — a permanently-stuck "Not opened" row that
+    // misrepresented what we can actually observe. Only the primary
+    // recipient (first "to", falling back to whoever's first) is
+    // trackable; track only that one.
+    const primary = recipients[0];
+
+    // Everything the sent-out HTML needs (pixel src, rewritten link hrefs)
+    // is generated CLIENT-SIDE and applied synchronously, before any
+    // network `await`. Gmail's own send handler is a bubble-phase listener
+    // on an ancestor of the button we capture on — it can only run after
+    // this synchronous handler returns, so as long as the DOM mutation
+    // happens in this call stack, it happens-before Gmail serializes and
+    // transmits the compose body. Registering the tracker/links with the
+    // server is genuinely fire-and-forget from here on — its timing no
+    // longer affects what bytes get sent.
+    const trackerId = crypto.randomUUID();
+
     const trackableLinks = collectTrackableLinks(body);
-
-    for (let i = 0; i < recipients.length; i++) {
-      const { email, field } = recipients[i];
-      // Arbitrary attribution owner: attach links to the first recipient's
-      // tracker call only.
-      const linksForThisCall = (i === 0 && trackableLinks.length > 0)
-        ? trackableLinks.map(l => ({ url: l.url, type: l.type }))
-        : undefined;
-
-      try {
-        const { trackerId, links: trackedLinks } = await createTracker(email, subject, threadId, field, linksForThisCall);
-        injectPixel(body, trackerId);
-
-        if (linksForThisCall && trackedLinks && trackedLinks.length > 0) {
-          applyTrackedLinks(body, trackableLinks, trackedLinks);
-        }
-      } catch (err) {
-        console.error("[Recon] Tracker failed:", err);
-      }
+    trackableLinks.forEach((l) => {
+      l.id = crypto.randomUUID();
+      l.trackedUrl = `${config.serverUrl}/l/${l.id}`;
+    });
+    if (trackableLinks.length > 0) {
+      applyTrackedLinksSync(body, trackableLinks);
     }
+
+    injectPixel(body, trackerId);
+    muteEmails([trackerId]);
+
+    const linksForThisCall = trackableLinks.length > 0
+      ? trackableLinks.map(l => ({ id: l.id, url: l.url, type: l.type }))
+      : undefined;
+
+    const allRecipients = recipients.map(r => ({ email: r.email, field: r.field }));
+
+    registerTracker(trackerId, primary.email, subject, threadId, primary.field, linksForThisCall, allRecipients)
+      .catch((err) => console.error("[Recon] Tracker registration failed:", err));
   }
 
   function isScheduleSendConfirmButton(el) {
@@ -420,19 +466,24 @@
   const sentCache = {};
 
   async function fetchSentStatus() {
-    if (!config.serverUrl || !config.senderEmail) return null;
-    const cacheKey = config.senderEmail;
+    if (!config.serverUrl || (!config.apiKey && !config.senderEmail)) return null;
+    const cacheKey = config.apiKey || config.senderEmail;
     const now = Date.now();
-    if (sentCache[cacheKey] && now - sentCache[cacheKey].time < 10000) {
+    if (sentCache[cacheKey] && now - sentCache[cacheKey].time < 4000) {
       return sentCache[cacheKey].data;
     }
     try {
+      const path = config.apiKey
+        ? "/status/sent"
+        : `/status/sent?sender_email=${encodeURIComponent(config.senderEmail)}`;
+      const headers = config.apiKey ? { "X-API-Key": config.apiKey } : {};
       const data = await new Promise((resolve, reject) => {
         chrome.runtime.sendMessage(
           {
             type: "fetch",
             serverUrl: config.serverUrl,
-            path: `/status/sent?sender_email=${encodeURIComponent(config.senderEmail)}`,
+            path,
+            headers,
           },
           (response) => {
             if (chrome.runtime.lastError) {
@@ -522,8 +573,15 @@
     return matches.length > 0 ? matches : null;
   }
 
-  function matchSentDataFuzzy(sentData, recipient, subject) {
+  // excludeIds: sentData entries already claimed by another row in this same
+  // pass. Fuzzy matching (recipient+subject only, no thread_id) is ambiguous
+  // by nature — without this, two different Sent-list rows with the same
+  // recipient+subject (e.g. repeated test sends) can both latch onto the
+  // same underlying entry, bleeding an older email's open status onto a
+  // brand-new, actually-unopened row.
+  function matchSentDataFuzzy(sentData, recipient, subject, excludeIds) {
     const match = sentData.find((e) => {
+      if (excludeIds && excludeIds.has(e.id)) return false;
       const recipientMatch = !recipient || e.recipient === recipient;
       const subjectMatch = !subject || !e.subject ||
         e.subject.toLowerCase().includes(subject.toLowerCase()) ||
@@ -537,9 +595,9 @@
   // the recipient+subject heuristic when no thread_id is available (known
   // limitation: thread_id is null for brand-new sends until Gmail assigns
   // one — see HANDOFF.md known issues) or nothing matched by id.
-  function getMatchesForContext(sentData, threadId, recipient, subject) {
+  function getMatchesForContext(sentData, threadId, recipient, subject, excludeIds) {
     return matchSentDataByThreadId(sentData, threadId) ||
-      matchSentDataFuzzy(sentData, recipient, subject) ||
+      matchSentDataFuzzy(sentData, recipient, subject, excludeIds) ||
       [];
   }
 
@@ -562,6 +620,17 @@
     if (status === 'green') return '#0d9e3f';
     if (status === 'orange') return '#e67e22';
     return '#bbb';
+  }
+
+  // Real SVG instead of a unicode "✓✓" + negative letter-spacing hack — the
+  // text-glyph version rendered inconsistently across OS/font stacks
+  // (sometimes drawing as two visibly separated pairs instead of one tight
+  // double-check), which read as broken/duplicated to users.
+  function checkmarkSvg(color, size = 16) {
+    return `<svg width="${size}" height="${size}" viewBox="0 0 16 16" fill="none" style="display:block;">
+      <path d="M1.5 8.3 4.2 11 8 6.6" stroke="${color}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M6.3 8.3 9 11 14 5" stroke="${color}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>`;
   }
 
   // Builds popover HTML for one or many sentData entries on the same
@@ -618,30 +687,16 @@
 
     const now = Date.now();
     const GIVE_UP_MS = 5 * 60 * 1000;
+    // Rows are processed top-to-bottom, matching sentData's newest-first
+    // order. Once a fuzzy match claims a sentData entry, no other row in
+    // this pass may reuse it — prevents two Sent-list rows with the same
+    // recipient+subject (repeated test sends, reused subject lines) from
+    // both showing the same (possibly stale/opened) status.
+    const usedEmailIds = new Set();
 
-    for (const row of rows) {
-      if (row._reconDone) continue;
-
-      const recipient = getRecipientFromRow(row);
-      const subject = getSubjectFromRow(row);
-      if (!recipient && !subject) continue;
-
-      // Track first-attempt time so we can bound retries, but do NOT mark
-      // the row done just because we scanned it — async tracker creation +
-      // the 10s sentData cache mean the match may simply not exist yet.
-      if (!row._reconFirstSeenAt) row._reconFirstSeenAt = now;
-
-      const threadId = getThreadIdFromRow(row);
-      const matches = getMatchesForContext(sentData, threadId, recipient, subject);
-
-      if (matches.length === 0) {
-        if (now - row._reconFirstSeenAt > GIVE_UP_MS) {
-          row._reconDone = true; // give up — bound polling cost
-        }
-        continue; // keep retrying on future polls
-      }
-
-      row._reconDone = true; // match found and about to render — permanently done
+    function applyMatch(row, matches) {
+      matches.forEach((m) => usedEmailIds.add(m.id));
+      row._reconMatchedIds = matches.map((m) => m.id);
       renderRowIndicator(row, matches);
 
       // Self-tracking suppression: clicking into this row is what triggers
@@ -654,17 +709,64 @@
         row.addEventListener("click", () => rowThreadIds.forEach(muteThread), true);
       }
     }
+
+    for (const row of rows) {
+      if (row._reconGaveUp) continue;
+
+      // Already matched on an earlier poll — re-fetch by id instead of
+      // re-running fuzzy matching, so an unopened -> opened transition
+      // (or a growing open count) keeps showing up instead of the
+      // checkmark freezing at whatever it first rendered.
+      if (row._reconMatchedIds) {
+        const refreshed = sentData.filter((e) => row._reconMatchedIds.includes(e.id));
+        if (refreshed.length > 0) applyMatch(row, refreshed);
+        continue;
+      }
+
+      const recipient = getRecipientFromRow(row);
+      const subject = getSubjectFromRow(row);
+      if (!recipient && !subject) continue;
+
+      // Track first-attempt time so we can bound retries, but do NOT mark
+      // the row done just because we scanned it — async tracker creation +
+      // the 10s sentData cache mean the match may simply not exist yet.
+      if (!row._reconFirstSeenAt) row._reconFirstSeenAt = now;
+
+      const threadId = getThreadIdFromRow(row);
+      const matches = getMatchesForContext(sentData, threadId, recipient, subject, usedEmailIds);
+
+      if (matches.length === 0) {
+        if (now - row._reconFirstSeenAt > GIVE_UP_MS) {
+          row._reconGaveUp = true; // give up — bound polling cost
+          console.log('[Recon] Row never matched, giving up:', { recipient, subject, threadId });
+        }
+        continue; // keep retrying on future polls
+      }
+
+      applyMatch(row, matches);
+    }
   }
 
   function renderRowIndicator(row, matches) {
-    if (row.querySelector('.recon-checkmark')) return;
-
     const status = computeOverallStatus(matches);
+    const totalOpens = matches.reduce((sum, m) => sum + (m.total_opens || 0), 0);
+    const signature = `${status}:${totalOpens}`;
+
+    // Rows are re-scanned every poll (see setInterval below), so a row
+    // that was "not opened" on first render must still pick up a later
+    // open — previously this bailed out permanently once any indicator
+    // existed, freezing the checkmark at its first-seen state forever.
+    const existing = row.querySelector('.recon-checkmark');
+    if (existing) {
+      if (existing.dataset.signature === signature) return;
+      existing.remove();
+    }
+
     const indicator = document.createElement('span');
     indicator.className = 'recon-checkmark';
-    indicator.style.cssText = 'font-size:14px;cursor:default;vertical-align:middle;margin-right:4px;letter-spacing:-2px;user-select:none;position:relative;';
-    indicator.textContent = '✓✓';
-    indicator.style.color = statusColor(status);
+    indicator.dataset.signature = signature;
+    indicator.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;width:22px;height:20px;cursor:default;user-select:none;position:relative;flex-shrink:0;';
+    indicator.innerHTML = checkmarkSvg(statusColor(status));
 
     if (status !== 'grey') {
       const popover = document.createElement('div');
@@ -679,7 +781,12 @@
       indicator.title = 'Sent — not opened yet';
     }
 
-    const starEl = row.querySelector('div[role="checkbox"][aria-label*="Star"]');
+    // aria-label is case-varying across Gmail UI versions ("Not starred" vs
+    // "Not Starred") — match case-insensitively (CSS attr-selector "i" flag)
+    // so this doesn't silently fail to the prepend fallback below, which
+    // dumps the indicator at the very left edge of the row (before the
+    // checkbox) instead of alongside the star.
+    const starEl = row.querySelector('div[role="checkbox"][aria-label*="star" i]');
     if (starEl && starEl.parentElement) {
       starEl.parentElement.insertBefore(indicator, starEl.nextSibling);
     } else {
@@ -711,27 +818,36 @@
     // specific opened thread rather than ambiguous row-level chips.
     if (!/#(sent|inbox)\//.test(hash)) return;
 
-    if (document.querySelector('.recon-thread-check')) return;
-
     const sentData = await fetchSentStatus();
     if (!sentData || sentData.length === 0) return;
 
+    // h2.hP (the subject heading) has been one of Gmail's more stable
+    // selectors for years — anchor here first. span.xW.xY (per-message
+    // timestamp) is far more brittle and was observed to silently stop
+    // matching in testing, which made the checkmark vanish entirely with
+    // no console signal. Falling back to it only if the subject anchor is
+    // somehow missing, and logging either way so a future break is
+    // diagnosable from the console instead of requiring a live DOM dump.
+    const subjectEl = document.querySelector('h2.hP');
     const dateEl = document.querySelector('span.xW.xY span[title]');
-    if (!dateEl) return;
-
-    const headerRow = dateEl.closest('div') || dateEl.parentElement;
-    if (!headerRow) return;
+    const headerRow = subjectEl || (dateEl && (dateEl.closest('div') || dateEl.parentElement));
+    if (!headerRow) {
+      console.warn('[Recon] injectThreadCheckmark: no subject or date anchor found, skipping.');
+      return;
+    }
 
     const emailEl = document.querySelector('span.go span[email]');
     const recipientEmail = emailEl?.getAttribute('email');
-    const subjectEl = document.querySelector('h2.hP');
     const subject = subjectEl?.textContent;
 
     // For an OPEN thread, the thread_id is trivially available from the URL
     // hash — use the same regex as getThreadId() for consistency.
     const threadId = extractThreadIdFromHash(hash);
     const matches = getMatchesForContext(sentData, threadId, recipientEmail, subject);
-    if (matches.length === 0) return;
+    if (matches.length === 0) {
+      console.log('[Recon] injectThreadCheckmark: no tracked match for', { threadId, recipientEmail, subject });
+      return;
+    }
 
     // Fallback self-tracking suppression for direct navigation/refresh into
     // an already-open tracked thread (the click-based mute in
@@ -741,11 +857,25 @@
     if (threadId) muteThread(threadId);
 
     const status = computeOverallStatus(matches);
+    const totalOpens = matches.reduce((sum, m) => sum + (m.total_opens || 0), 0);
+    const signature = `${threadId || subject}:${status}:${totalOpens}`;
+
+    // Re-run every poll tick (this function used to bail out permanently
+    // once any '.recon-thread-check' existed — meaning if you opened the
+    // thread while it was still unopened, the checkmark froze on "not
+    // opened" forever, even after a real open landed seconds later). Now
+    // we only touch the DOM when the underlying status actually changed,
+    // both to keep it live and to avoid flicker/duplicate nodes on ticks
+    // where nothing changed.
+    const existing = document.querySelector('.recon-thread-check');
+    if (existing && existing.dataset.signature === signature) return;
+    if (existing) existing.remove();
+
     const indicator = document.createElement('span');
     indicator.className = 'recon-thread-check';
-    indicator.style.cssText = 'font-size:14px;cursor:default;vertical-align:middle;margin-left:8px;letter-spacing:-2px;user-select:none;position:relative;';
-    indicator.textContent = '✓✓';
-    indicator.style.color = statusColor(status);
+    indicator.dataset.signature = signature;
+    indicator.style.cssText = 'display:inline-flex;align-items:center;vertical-align:middle;margin-left:8px;cursor:default;user-select:none;position:relative;';
+    indicator.innerHTML = checkmarkSvg(statusColor(status), 18);
 
     if (status !== 'grey') {
       const popover = document.createElement('div');

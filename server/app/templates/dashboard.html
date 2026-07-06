@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% set active = "dashboard" %}
+{% block title %}Recon &mdash; Dashboard{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Tracked Emails</h1>
+  <div class="flex">
+    <span class="page-subtitle">Recent sends &middot; opens &middot; follow-ups</span>
+    <button type="button" class="btn btn-secondary" style="padding:4px 12px;font-size:0.75rem;" onclick="window.location.reload()">Refresh</button>
+  </div>
+</div>
+
+{% if emails %}
+<div class="stats-bar">
+  <span><strong>{{ stats.total }}</strong> tracked</span>
+  <span><strong>{{ stats.opened }}</strong> read</span>
+  {% if stats.needs_followup > 0 %}
+  <span class="stat-followup"><strong>{{ stats.needs_followup }}</strong> need follow-up</span>
+  {% endif %}
+  <span><strong>{{ stats.clicked }}</strong> clicked</span>
+</div>
+
+<div id="dashboard-filters">
+  <div class="filter-tabs">
+    <button type="button" class="filter-tab active" data-filter="all">All</button>
+    <button type="button" class="filter-tab" data-filter="opened">Read</button>
+    <button type="button" class="filter-tab" data-filter="unopened">Unread</button>
+    <button type="button" class="filter-tab" data-filter="clicked">Clicked</button>
+    <button type="button" class="filter-tab" data-filter="followup">Needs follow-up</button>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Subject</th>
+        <th>Recipient</th>
+        <th>Sent</th>
+        <th>Opens</th>
+        <th>Clicks</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for e in emails %}
+      <tr class="row-clickable{% if e.needs_followup %} row-followup{% endif %}"
+          data-filter="{{ e.filter_tags }}"
+          onclick="window.location='/dashboard/email/{{ e.id }}'">
+        <td style="font-weight:600;max-width:28ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+          {{ e.subject or "(no subject)" }}
+        </td>
+        <td>
+          <div class="recip-chips">
+            {% for field, addrs in e.recipients %}
+              {% for addr in addrs %}
+              <span class="recip-chip{% if field != 'to' %} recip-chip-{{ field }}{% endif %}">
+                {% if field != "to" %}<span class="recip-chip-field">{{ field|title }}</span>{% endif %}{{ addr }}
+              </span>
+              {% endfor %}
+            {% endfor %}
+          </div>
+        </td>
+        <td class="text-muted" title="{{ e.created_at.strftime('%b %d, %Y %H:%M') if e.created_at else '' }}">
+          {{ e.created_at|time_ago if e.created_at else "—" }}
+        </td>
+        <td class="text-muted">
+          {% if e.total_opens > 0 %}
+            {{ e.total_opens }}{% if e.last_opened %} &middot; {{ e.last_opened|time_ago }}{% endif %}
+          {% else %}—{% endif %}
+        </td>
+        <td class="text-muted">
+          {% if e.link_clicks > 0 %}{{ e.link_clicks }}{% else %}—{% endif %}
+        </td>
+        <td>
+          <span class="status-cell">
+            {% if e.verified_opens > 0 %}
+              <span class="status-dot opened" aria-hidden="true"></span>
+              <span class="status-label">Read</span>
+            {% elif e.total_opens > 0 %}
+              <span class="status-dot unverified" aria-hidden="true"></span>
+              <span class="status-label warn">Unverified</span>
+            {% elif e.needs_followup %}
+              <span class="status-dot none" aria-hidden="true"></span>
+              <span class="status-label danger">Follow up</span>
+            {% else %}
+              <span class="status-dot none" aria-hidden="true"></span>
+              <span class="status-label muted">Unread</span>
+            {% endif %}
+            {% if e.link_clicks > 0 %}
+              <span class="badge badge-accent" style="margin-left:6px;">Clicked</span>
+            {% endif %}
+          </span>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p id="filter-empty" class="empty-state is-hidden" style="padding:24px;">No emails match this filter.</p>
+</div>
+{% else %}
+<div class="empty-state">No tracked emails yet. Send one from Gmail with the Recon extension to see it here.</div>
+{% endif %}
+{% endblock %}
+
+{% block page_scripts %}
+<script>
+  reconInitFilters("dashboard-filters", "filter-tab");
+  (function () {
+    var container = document.getElementById("dashboard-filters");
+    if (!container) return;
+    var emptyEl = document.getElementById("filter-empty");
+    var tabs = container.querySelectorAll(".filter-tab");
+    tabs.forEach(function (tab) {
+      tab.addEventListener("click", function () {
+        if (!emptyEl) return;
+        var visible = container.querySelectorAll("tbody tr[data-filter]:not(.is-hidden)");
+        emptyEl.classList.toggle("is-hidden", visible.length > 0);
+      });
+    });
+  })();
+</script>
+{% endblock %}

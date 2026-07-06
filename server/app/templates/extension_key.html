@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% set active = "extension-key" %}
+{% block title %}Recon &mdash; Extension Key{% endblock %}
+{% block content %}
+<h1>Extension API Key</h1>
+
+{% if new_key %}
+<div class="key-reveal mb-24">
+  <div class="key-reveal-title">New key generated</div>
+  <div class="text-muted mb-16">Copy this key now — it won't be shown again. Paste it into the Recon extension popup.</div>
+  <div class="flex" style="gap:10px;align-items:stretch;">
+    <code class="key-reveal-value" style="flex:1;">{{ new_key }}</code>
+    <button type="button" class="btn btn-secondary" style="flex-shrink:0;" onclick="reconCopyText('{{ new_key }}', this)">Copy</button>
+  </div>
+</div>
+{% endif %}
+
+<div class="flex mb-24">
+  <form method="post" action="/dashboard/extension-key">
+    <button type="submit" class="btn btn-primary">Generate New Key</button>
+  </form>
+</div>
+
+{% if keys %}
+<h2>Existing Keys</h2>
+<table>
+  <thead>
+    <tr><th>Key</th><th>Created</th><th>Last Used</th><th>Status</th><th></th></tr>
+  </thead>
+  <tbody>
+    {% for k in keys %}
+    <tr>
+      <td><code>{{ k.masked }}</code></td>
+      <td class="text-muted">{{ k.created_at.strftime("%b %d, %Y") if k.created_at else "—" }}</td>
+      <td class="text-muted">{{ k.last_used_at.strftime("%b %d, %Y %H:%M") if k.last_used_at else "Never" }}</td>
+      <td>
+        {% if k.revoked %}
+          <span class="badge badge-muted">Revoked</span>
+        {% else %}
+          <span class="badge badge-accent">Active</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if not k.revoked %}
+        <form method="post" action="/dashboard/extension-key/{{ k.id }}/revoke" style="display:inline;">
+          <button type="submit" class="btn btn-danger" style="padding:4px 10px;font-size:0.6875rem;">Revoke</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="text-muted">No API keys yet. Generate one to connect the Recon browser extension.</p>
+{% endif %}
+{% endblock %}
