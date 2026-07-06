@@ -58,7 +58,15 @@
   <div id="clerk-sign-in"><span class="fallback">Loading sign-in&hellip;</span></div>
 
   <script>
+    function reconShowSignInError(message) {
+      var el = document.getElementById("clerk-sign-in");
+      if (el) el.innerHTML = '<span class="fallback">' + message + '</span>';
+    }
     function reconInitClerk() {
+      if (!window.Clerk) {
+        reconShowSignInError("Sign-in failed to load. Try again in a moment.");
+        return;
+      }
       window.Clerk.load().then(function () {
         if (window.Clerk.user) {
           window.location.href = "/dashboard";
@@ -69,8 +77,16 @@
           afterSignInUrl: "/dashboard",
           afterSignUpUrl: "/dashboard"
         });
+      }).catch(function () {
+        reconShowSignInError("Sign-in failed to initialize.");
       });
     }
+    setTimeout(function () {
+      var el = document.getElementById("clerk-sign-in");
+      if (el && el.textContent.indexOf("Loading") !== -1) {
+        reconShowSignInError("Sign-in is taking too long — refresh or contact support.");
+      }
+    }, 12000);
   </script>
   <script
     async
@@ -78,6 +94,7 @@
     data-clerk-publishable-key="{{ clerk_publishable_key }}"
     src="https://{{ clerk_frontend_api }}/npm/@clerk/clerk-js@5/dist/clerk.browser.js"
     onload="reconInitClerk()"
+    onerror="reconShowSignInError('Could not load Clerk from {{ clerk_frontend_api }}.')"
   ></script>
 </body>
 </html>

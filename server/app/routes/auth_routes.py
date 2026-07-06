@@ -28,9 +28,36 @@ templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), ".
 # that JS, so no cookie was ever set — that's why the previous /login just
 # looped back to a 401. Embedding <SignIn/> in-page is Clerk's documented
 # path for a non-SPA backend that isn't using their Account Portal domain.
-_clerk_jwks_url = os.environ.get("CLERK_JWKS_URL", "")
-_clerk_frontend_api = _clerk_jwks_url.replace("/.well-known/jwks.json", "")
-_clerk_frontend_api = _clerk_frontend_api.removeprefix("https://").removeprefix("http://")
+import base64
+
+
+def _frontend_api_from_publishable_key(publishable_key: str) -> str:
+    """Clerk embeds the instance Frontend API host in the publishable key."""
+    if not publishable_key or not publishable_key.startswith("pk_"):
+        return ""
+    encoded = publishable_key.split("_", 2)[-1]
+    padded = encoded + "=" * (-len(encoded) % 4)
+    try:
+        host = base64.b64decode(padded).decode("utf-8").rstrip("$")
+        return host.removeprefix("https://").removeprefix("http://").rstrip("/")
+    except Exception:
+        return ""
+
+
+def _resolve_clerk_frontend_api() -> str:
+    configured = os.environ.get("CLERK_FRONTEND_API", "").strip()
+    if configured:
+        return configured.removeprefix("https://").removeprefix("http://").rstrip("/")
+
+    from_key = _frontend_api_from_publishable_key(os.environ.get("CLERK_PUBLISHABLE_KEY", ""))
+    if from_key:
+        return from_key
+
+    jwks_url = os.environ.get("CLERK_JWKS_URL", "").strip()
+    return jwks_url.replace("/.well-known/jwks.json", "").removeprefix("https://").removeprefix("http://").rstrip("/")
+
+
+_clerk_frontend_api = _resolve_clerk_frontend_api()
 templates.env.globals["clerk_publishable_key"] = os.environ.get("CLERK_PUBLISHABLE_KEY", "")
 templates.env.globals["clerk_frontend_api"] = _clerk_frontend_api
 
