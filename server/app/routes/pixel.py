@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy import func, select
@@ -19,11 +19,28 @@ PIXEL_GIF = (
 
 APPLE_MPP_UA_FRAGMENTS = ["CloudImageProxy"]
 
+# Gmail (and other providers) prefetch/cache every image in a message within
+# seconds of it being sent — before any human could possibly read it. That
+# prefetch hits our pixel and looks exactly like a real open. The extension's
+# post-send mute is meant to suppress it, but that relies on the extension
+# being loaded and working. This server-side grace window is an independent
+# backstop: any pixel fire this soon after the tracker was created can't be a
+# genuine human open, so we record it but flag it internal (hidden from counts).
+SEND_GRACE_SECONDS = 15
+
 
 def is_apple_mpp(user_agent: str | None) -> bool:
     if not user_agent:
         return False
     return any(frag in user_agent for frag in APPLE_MPP_UA_FRAGMENTS)
+
+
+def is_within_send_grace(created_at: datetime | None) -> bool:
+    if not created_at:
+        return False
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - created_at < timedelta(seconds=SEND_GRACE_SECONDS)
 
 
 async def is_thread_muted(db: AsyncSession, thread_id: str | None) -> bool:
@@ -62,7 +79,11 @@ async def log_open(
         user_agent = request.headers.get("user-agent")
         ip = request.headers.get("x-forwarded-for", request.client.host if request.client else None)
         verified = not is_apple_mpp(user_agent)
-        internal = await is_thread_muted(db, email.thread_id) or await is_email_muted(db, tracker_id)
+        internal = (
+            is_within_send_grace(email.created_at)
+            or await is_thread_muted(db, email.thread_id)
+            or await is_email_muted(db, tracker_id)
+        )
 
         open_row = Open(
             email_id=tracker_id,
