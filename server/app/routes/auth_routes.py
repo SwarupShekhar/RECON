@@ -135,6 +135,33 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def _dedupe_dashboard_rows(rows: list) -> list:
+    """Collapse accidental double-/track rows from the same Gmail send."""
+    kept: list = []
+    index_by_key: dict = {}
+
+    for row in rows:
+        email, total_opens, verified_opens = row
+        created = email.created_at
+        bucket = None
+        if created:
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            bucket = created.replace(second=(created.second // 30) * 30, microsecond=0)
+        key = (email.subject, email.thread_id, bucket)
+        if key in index_by_key:
+            prev_idx = index_by_key[key]
+            prev_email, prev_opens, prev_verified = kept[prev_idx]
+            if (total_opens or 0) > (prev_opens or 0):
+                kept[prev_idx] = row
+            elif (total_opens or 0) == (prev_opens or 0) and email.all_recipients and not prev_email.all_recipients:
+                kept[prev_idx] = row
+            continue
+        index_by_key[key] = len(kept)
+        kept.append(row)
+    return kept
+
+
 def _grouped_recipients(all_recipients_json: str | None, fallback_email: str):
     """Turn the stored all_recipients JSON (list of {email, field}) into an
     ordered [(field, [emails])] list for the dashboard, so Cc/Bcc show up
@@ -209,6 +236,7 @@ async def dashboard_page(
         .order_by(Email.created_at.desc())
     )
     rows = result.all()
+    rows = _dedupe_dashboard_rows(rows)
     email_ids = [email.id for email, _, _ in rows]
 
     last_opened_map: dict = {}

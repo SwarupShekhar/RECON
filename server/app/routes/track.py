@@ -23,6 +23,27 @@ async def _track_response_for_email(email: Email, request: Request, db: AsyncSes
     return TrackResponse(tracker_id=email.id, links=links_out)
 
 
+async def _find_recent_duplicate(
+    db: AsyncSession, req: TrackRequest, since: datetime
+) -> Email | None:
+    query = (
+        select(Email)
+        .where(
+            Email.sender_email == req.sender_email,
+            Email.subject == req.subject,
+            Email.created_at >= since,
+        )
+        .order_by(Email.created_at.desc())
+        .limit(1)
+    )
+    if req.thread_id:
+        query = query.where(Email.thread_id == req.thread_id)
+    else:
+        query = query.where(Email.recipient_email == req.recipient_email)
+    result = await db.execute(query)
+    return result.scalar_one_or_none()
+
+
 @router.post("/track", response_model=TrackResponse)
 async def create_tracker(req: TrackRequest, request: Request, db: AsyncSession = Depends(get_db)):
     if req.id:
@@ -31,22 +52,14 @@ async def create_tracker(req: TrackRequest, request: Request, db: AsyncSession =
         if existing:
             return await _track_response_for_email(existing, request, db)
 
-    if req.thread_id:
-        since = datetime.now(timezone.utc) - timedelta(seconds=60)
-        dup_result = await db.execute(
-            select(Email)
-            .where(
-                Email.sender_email == req.sender_email,
-                Email.thread_id == req.thread_id,
-                Email.subject == req.subject,
-                Email.created_at >= since,
-            )
-            .order_by(Email.created_at.desc())
-            .limit(1)
-        )
-        duplicate = dup_result.scalar_one_or_none()
-        if duplicate:
-            return await _track_response_for_email(duplicate, request, db)
+    since = datetime.now(timezone.utc) - timedelta(seconds=120)
+    duplicate = await _find_recent_duplicate(db, req, since)
+    if duplicate:
+        if req.all_recipients and not duplicate.all_recipients:
+            duplicate.all_recipients = json.dumps([r.model_dump() for r in req.all_recipients])
+            await db.commit()
+            await db.refresh(duplicate)
+        return await _track_response_for_email(duplicate, request, db)
 
     all_recipients_json = (
         json.dumps([r.model_dump() for r in req.all_recipients]) if req.all_recipients else None
