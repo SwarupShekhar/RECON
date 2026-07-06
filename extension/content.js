@@ -128,6 +128,30 @@
     const results = [];
     const seen = new Set();
 
+    const fieldFromLabel = (label) => {
+      const l = (label || "").trim().toLowerCase();
+      if (l.startsWith("cc")) return "cc";
+      if (l.startsWith("bcc")) return "bcc";
+      if (l.startsWith("to")) return "to";
+      return null;
+    };
+
+    const addChip = (email, field) => {
+      if (email && !seen.has(email)) {
+        seen.add(email);
+        results.push({ email, field });
+      }
+    };
+
+    // Prefer Gmail's labeled recipient rows (To / Cc / Bcc).
+    container.querySelectorAll("[aria-label]").forEach((el) => {
+      const field = fieldFromLabel(el.getAttribute("aria-label"));
+      if (!field) return;
+      el.querySelectorAll("span[email]").forEach((chip) => {
+        addChip(chip.getAttribute("email"), field);
+      });
+    });
+
     const toInput = container.querySelector('input[aria-label="To recipients"]') ||
       container.querySelector('input[name="to"]');
     const ccInput = container.querySelector('input[aria-label="Cc recipients"]') ||
@@ -139,13 +163,8 @@
       if (!input) return;
       const parent = input.closest('div[role="list"]') || input.parentElement;
       if (!parent) return;
-      const chips = parent.querySelectorAll('span[email]');
-      chips.forEach((chip) => {
-        const email = chip.getAttribute("email");
-        if (email && !seen.has(email)) {
-          seen.add(email);
-          results.push({ email, field });
-        }
+      parent.querySelectorAll("span[email]").forEach((chip) => {
+        addChip(chip.getAttribute("email"), field);
       });
     };
 
@@ -154,13 +173,8 @@
     addChips(bccInput, "bcc");
 
     if (results.length === 0) {
-      const allChips = container.querySelectorAll('span[email]');
-      allChips.forEach((chip) => {
-        const email = chip.getAttribute("email");
-        if (email && !seen.has(email)) {
-          seen.add(email);
-          results.push({ email, field: "to" });
-        }
+      container.querySelectorAll("span[email]").forEach((chip) => {
+        addChip(chip.getAttribute("email"), "to");
       });
     }
 
@@ -272,6 +286,13 @@
       console.warn("[Recon] No config — click extension icon to set server URL and email");
       return;
     }
+
+    if (container._reconSendHandled) {
+      console.log("[Recon] Send already handled for this compose window, skipping duplicate");
+      return;
+    }
+    container._reconSendHandled = true;
+    setTimeout(() => { container._reconSendHandled = false; }, 4000);
 
     const body = getComposeBody(container);
     if (!body) {
@@ -398,14 +419,15 @@
 
   function bindSendButton(btn) {
     if (btn._reconBound) return;
+    const container = findComposeContainer(btn);
+    if (!container) return;
+    if (container._reconSendButtonBound) return;
 
     btn._reconBound = true;
-    btn.addEventListener("click", (e) => {
-      const container = findComposeContainer(btn);
-      if (container) {
-        console.log("[Recon] Send clicked, container found");
-        handleSend(container);
-      }
+    container._reconSendButtonBound = true;
+    btn.addEventListener("click", () => {
+      console.log("[Recon] Send clicked, container found");
+      handleSend(container);
     }, true);
   }
 
