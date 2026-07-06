@@ -6,116 +6,241 @@
   <h1>Tracked Emails</h1>
   <div class="flex">
     <span class="page-subtitle">Recent sends &middot; opens &middot; follow-ups</span>
-    <button type="button" class="btn btn-secondary" style="padding:4px 12px;font-size:0.75rem;" onclick="window.location.reload()">Refresh</button>
+    <button type="button" id="dashboard-refresh" class="btn btn-secondary" style="padding:4px 12px;font-size:0.75rem;">Refresh</button>
   </div>
 </div>
 
-{% if emails %}
-<div class="stats-bar">
-  <span><strong>{{ stats.total }}</strong> tracked</span>
-  <span><strong>{{ stats.opened }}</strong> read</span>
-  {% if stats.needs_followup > 0 %}
-  <span class="stat-followup"><strong>{{ stats.needs_followup }}</strong> need follow-up</span>
-  {% endif %}
-  <span><strong>{{ stats.clicked }}</strong> clicked</span>
+<div id="dashboard-empty" class="empty-state{% if emails %} is-hidden{% endif %}">
+  No tracked emails yet. Send one from Gmail with the Recon extension to see it here.
 </div>
 
-<div id="dashboard-filters">
-  <div class="filter-tabs">
-    <button type="button" class="filter-tab active" data-filter="all">All</button>
-    <button type="button" class="filter-tab" data-filter="opened">Read</button>
-    <button type="button" class="filter-tab" data-filter="unopened">Unread</button>
-    <button type="button" class="filter-tab" data-filter="clicked">Clicked</button>
-    <button type="button" class="filter-tab" data-filter="followup">Needs follow-up</button>
+<div id="dashboard-content"{% if not emails %} class="is-hidden"{% endif %}>
+  <div class="stats-bar" id="dashboard-stats">
+    <span><strong data-stat="total">{{ stats.total }}</strong> tracked</span>
+    <span><strong data-stat="opened">{{ stats.opened }}</strong> read</span>
+    <span data-stat-wrap="followup"{% if stats.needs_followup == 0 %} class="is-hidden"{% endif %}>
+      <span class="stat-followup"><strong data-stat="needs_followup">{{ stats.needs_followup }}</strong> need follow-up</span>
+    </span>
+    <span><strong data-stat="clicked">{{ stats.clicked }}</strong> clicked</span>
   </div>
 
-  <table>
-    <thead>
-      <tr>
-        <th>Subject</th>
-        <th>Recipient</th>
-        <th>Sent</th>
-        <th>Opens</th>
-        <th>Clicks</th>
-        <th>Status</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for e in emails %}
-      <tr class="row-clickable{% if e.needs_followup %} row-followup{% endif %}"
-          data-filter="{{ e.filter_tags }}"
-          onclick="window.location='/dashboard/email/{{ e.id }}'">
-        <td style="font-weight:600;max-width:28ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-          {{ e.subject or "(no subject)" }}
-        </td>
-        <td>
-          <div class="recip-chips">
-            {% for field, addrs in e.recipients %}
-              {% for addr in addrs %}
-              <span class="recip-chip{% if field != 'to' %} recip-chip-{{ field }}{% endif %}">
-                {% if field != "to" %}<span class="recip-chip-field">{{ field|title }}</span>{% endif %}{{ addr }}
-              </span>
+  <div id="dashboard-filters">
+    <div class="filter-tabs">
+      <button type="button" class="filter-tab active" data-filter="all">All</button>
+      <button type="button" class="filter-tab" data-filter="opened">Read</button>
+      <button type="button" class="filter-tab" data-filter="unopened">Unread</button>
+      <button type="button" class="filter-tab" data-filter="clicked">Clicked</button>
+      <button type="button" class="filter-tab" data-filter="followup">Needs follow-up</button>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Subject</th>
+          <th>Recipients</th>
+          <th>Sent</th>
+          <th>Opens</th>
+          <th>Clicks</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody id="dashboard-tbody">
+        {% for e in emails %}
+        <tr class="row-clickable{% if e.needs_followup %} row-followup{% endif %}"
+            data-filter="{{ e.filter_tags }}"
+            onclick="window.location='/dashboard/email/{{ e.id }}'">
+          <td style="font-weight:600;max-width:28ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+            {{ e.subject or "(no subject)" }}
+          </td>
+          <td>
+            <div class="recip-chips" aria-label="Email recipients">
+              {% for field, addrs in e.recipients %}
+                {% for addr in addrs %}
+                <span class="recip-chip recip-chip-{{ field }}" title="{{ field|title }}: {{ addr }}">
+                  <span class="recip-chip-field">{{ field|title }}</span>
+                  <span class="recip-chip-email">{{ addr }}</span>
+                </span>
+                {% endfor %}
               {% endfor %}
-            {% endfor %}
-          </div>
-        </td>
-        <td class="text-muted" title="{{ e.created_at.strftime('%b %d, %Y %H:%M') if e.created_at else '' }}">
-          {{ e.created_at|time_ago if e.created_at else "—" }}
-        </td>
-        <td class="text-muted">
-          {% if e.total_opens > 0 %}
-            {{ e.total_opens }}{% if e.last_opened %} &middot; {{ e.last_opened|time_ago }}{% endif %}
-          {% else %}—{% endif %}
-        </td>
-        <td class="text-muted">
-          {% if e.link_clicks > 0 %}{{ e.link_clicks }}{% else %}—{% endif %}
-        </td>
-        <td>
-          <span class="status-cell">
-            {% if e.verified_opens > 0 %}
-              <span class="status-dot opened" aria-hidden="true"></span>
-              <span class="status-label">Read</span>
-            {% elif e.total_opens > 0 %}
-              <span class="status-dot unverified" aria-hidden="true"></span>
-              <span class="status-label warn">Unverified</span>
-            {% elif e.needs_followup %}
-              <span class="status-dot none" aria-hidden="true"></span>
-              <span class="status-label danger">Follow up</span>
-            {% else %}
-              <span class="status-dot none" aria-hidden="true"></span>
-              <span class="status-label muted">Unread</span>
-            {% endif %}
-            {% if e.link_clicks > 0 %}
-              <span class="badge badge-accent" style="margin-left:6px;">Clicked</span>
-            {% endif %}
-          </span>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  <p id="filter-empty" class="empty-state is-hidden" style="padding:24px;">No emails match this filter.</p>
+            </div>
+          </td>
+          <td class="text-muted" title="{{ e.created_at.strftime('%b %d, %Y %H:%M') if e.created_at else '' }}">
+            {{ e.created_at|time_ago if e.created_at else "—" }}
+          </td>
+          <td class="text-muted">
+            {% if e.total_opens > 0 %}
+              {{ e.total_opens }}{% if e.last_opened %} &middot; {{ e.last_opened|time_ago }}{% endif %}
+            {% else %}—{% endif %}
+          </td>
+          <td class="text-muted">
+            {% if e.link_clicks > 0 %}{{ e.link_clicks }}{% else %}—{% endif %}
+          </td>
+          <td>
+            <span class="status-cell">
+              {% if e.verified_opens > 0 %}
+                <span class="status-dot opened" aria-hidden="true"></span>
+                <span class="status-label">Read</span>
+              {% elif e.total_opens > 0 %}
+                <span class="status-dot unverified" aria-hidden="true"></span>
+                <span class="status-label warn">Unverified</span>
+              {% elif e.needs_followup %}
+                <span class="status-dot none" aria-hidden="true"></span>
+                <span class="status-label danger">Follow up</span>
+              {% else %}
+                <span class="status-dot none" aria-hidden="true"></span>
+                <span class="status-label muted">Unread</span>
+              {% endif %}
+              {% if e.link_clicks > 0 %}
+                <span class="badge badge-accent" style="margin-left:6px;">Clicked</span>
+              {% endif %}
+            </span>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p id="filter-empty" class="empty-state is-hidden" style="padding:24px;">No emails match this filter.</p>
+  </div>
 </div>
-{% else %}
-<div class="empty-state">No tracked emails yet. Send one from Gmail with the Recon extension to see it here.</div>
-{% endif %}
 {% endblock %}
 
 {% block page_scripts %}
 <script>
+  function reconEsc(text) {
+    return String(text)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function reconFieldTitle(field) {
+    if (!field) return "To";
+    return field.charAt(0).toUpperCase() + field.slice(1);
+  }
+
+  function reconRenderRecipients(recipients) {
+    if (!recipients || !recipients.length) return "";
+    return recipients.map(function (r) {
+      var field = r.field || "to";
+      var title = reconFieldTitle(field) + ": " + r.email;
+      return '<span class="recip-chip recip-chip-' + field + '" title="' + reconEsc(title) + '">' +
+        '<span class="recip-chip-field">' + reconFieldTitle(field) + '</span>' +
+        '<span class="recip-chip-email">' + reconEsc(r.email) + '</span></span>';
+    }).join("");
+  }
+
+  function reconRenderStatusCell(row) {
+    var html = '<span class="status-cell">';
+    if (row.status === "read") {
+      html += '<span class="status-dot opened" aria-hidden="true"></span><span class="status-label">Read</span>';
+    } else if (row.status === "unverified") {
+      html += '<span class="status-dot unverified" aria-hidden="true"></span><span class="status-label warn">Unverified</span>';
+    } else if (row.status === "followup") {
+      html += '<span class="status-dot none" aria-hidden="true"></span><span class="status-label danger">Follow up</span>';
+    } else {
+      html += '<span class="status-dot none" aria-hidden="true"></span><span class="status-label muted">Unread</span>';
+    }
+    if (row.has_clicks) {
+      html += '<span class="badge badge-accent" style="margin-left:6px;">Clicked</span>';
+    }
+    html += "</span>";
+    return html;
+  }
+
+  function reconRenderDashboardRow(row) {
+    var followupClass = row.needs_followup ? " row-followup" : "";
+    return '<tr class="row-clickable' + followupClass + '" data-filter="' + row.filter_tags + '" onclick="window.location=\'/dashboard/email/' + row.id + '\'">' +
+      '<td style="font-weight:600;max-width:28ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + reconEsc(row.subject) + '</td>' +
+      '<td><div class="recip-chips" aria-label="Email recipients">' + reconRenderRecipients(row.recipients) + '</div></td>' +
+      '<td class="text-muted" title="' + (row.sent_title || "") + '">' + row.sent_ago + '</td>' +
+      '<td class="text-muted">' + row.opens + '</td>' +
+      '<td class="text-muted">' + row.clicks + '</td>' +
+      '<td>' + reconRenderStatusCell(row) + '</td></tr>';
+  }
+
+  function reconUpdateDashboardStats(stats) {
+    var bar = document.getElementById("dashboard-stats");
+    if (!bar) return;
+    ["total", "opened", "needs_followup", "clicked"].forEach(function (key) {
+      var el = bar.querySelector('[data-stat="' + key + '"]');
+      if (el) el.textContent = stats[key] || 0;
+    });
+    var followWrap = bar.querySelector('[data-stat-wrap="followup"]');
+    if (followWrap) {
+      followWrap.classList.toggle("is-hidden", !(stats.needs_followup > 0));
+    }
+  }
+
+  function reconSyncFilterEmptyState() {
+    var container = document.getElementById("dashboard-filters");
+    var emptyEl = document.getElementById("filter-empty");
+    if (!container || !emptyEl) return;
+    var visible = container.querySelectorAll("tbody tr[data-filter]:not(.is-hidden)");
+    emptyEl.classList.toggle("is-hidden", visible.length > 0);
+  }
+
+  function reconRebindDashboardFilters() {
+    var container = document.getElementById("dashboard-filters");
+    if (!container) return;
+    var activeTab = container.querySelector(".filter-tab.active");
+    var filter = activeTab ? activeTab.getAttribute("data-filter") : "all";
+    var rows = container.querySelectorAll("tbody tr[data-filter]");
+    rows.forEach(function (row) {
+      var tags = (row.getAttribute("data-filter") || "").split(/\s+/).filter(Boolean);
+      var show = filter === "all" || tags.indexOf(filter) !== -1;
+      row.classList.toggle("is-hidden", !show);
+    });
+    reconSyncFilterEmptyState();
+  }
+
+  function reconRefreshDashboard() {
+    var btn = document.getElementById("dashboard-refresh");
+    if (!btn || btn.disabled) return;
+    var orig = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Refreshing…";
+    fetch("/dashboard/data", { credentials: "same-origin", headers: { Accept: "application/json" } })
+      .then(function (res) {
+        if (!res.ok) throw new Error("refresh failed");
+        return res.json();
+      })
+      .then(function (data) {
+        var emptyEl = document.getElementById("dashboard-empty");
+        var contentEl = document.getElementById("dashboard-content");
+        var tbody = document.getElementById("dashboard-tbody");
+        if (!data.emails || !data.emails.length) {
+          if (emptyEl) emptyEl.classList.remove("is-hidden");
+          if (contentEl) contentEl.classList.add("is-hidden");
+          return;
+        }
+        if (emptyEl) emptyEl.classList.add("is-hidden");
+        if (contentEl) contentEl.classList.remove("is-hidden");
+        reconUpdateDashboardStats(data.stats || {});
+        if (tbody) {
+          tbody.innerHTML = data.emails.map(reconRenderDashboardRow).join("");
+        }
+        reconRebindDashboardFilters();
+      })
+      .catch(function () {
+        btn.textContent = "Failed";
+        setTimeout(function () { btn.textContent = orig; }, 1500);
+      })
+      .finally(function () {
+        btn.disabled = false;
+        if (btn.textContent === "Refreshing…") btn.textContent = orig;
+      });
+  }
+
   reconInitFilters("dashboard-filters", "filter-tab");
   (function () {
     var container = document.getElementById("dashboard-filters");
     if (!container) return;
-    var emptyEl = document.getElementById("filter-empty");
-    var tabs = container.querySelectorAll(".filter-tab");
-    tabs.forEach(function (tab) {
-      tab.addEventListener("click", function () {
-        if (!emptyEl) return;
-        var visible = container.querySelectorAll("tbody tr[data-filter]:not(.is-hidden)");
-        emptyEl.classList.toggle("is-hidden", visible.length > 0);
-      });
+    container.querySelectorAll(".filter-tab").forEach(function (tab) {
+      tab.addEventListener("click", reconSyncFilterEmptyState);
     });
+    reconSyncFilterEmptyState();
   })();
+  var refreshBtn = document.getElementById("dashboard-refresh");
+  if (refreshBtn) refreshBtn.addEventListener("click", reconRefreshDashboard);
 </script>
 {% endblock %}

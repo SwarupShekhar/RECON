@@ -62,21 +62,31 @@
       var el = document.getElementById("clerk-sign-in");
       if (el) el.innerHTML = '<span class="fallback">' + message + '</span>';
     }
+    function reconMountSignIn() {
+      document.getElementById("clerk-sign-in").innerHTML = "";
+      window.Clerk.mountSignIn(document.getElementById("clerk-sign-in"), {
+        afterSignInUrl: "/dashboard",
+        afterSignUpUrl: "/dashboard"
+      });
+    }
     function reconInitClerk() {
       if (!window.Clerk) {
         reconShowSignInError("Sign-in failed to load. Try again in a moment.");
         return;
       }
       window.Clerk.load().then(function () {
+        var signedOut = new URLSearchParams(window.location.search).get("signed_out") === "1";
+        if (signedOut && window.Clerk.session) {
+          return window.Clerk.signOut().then(function () {
+            window.history.replaceState({}, "", "/login");
+            reconMountSignIn();
+          });
+        }
         if (window.Clerk.user) {
           window.location.href = "/dashboard";
           return;
         }
-        document.getElementById("clerk-sign-in").innerHTML = "";
-        window.Clerk.mountSignIn(document.getElementById("clerk-sign-in"), {
-          afterSignInUrl: "/dashboard",
-          afterSignUpUrl: "/dashboard"
-        });
+        reconMountSignIn();
       }).catch(function () {
         reconShowSignInError("Sign-in failed to initialize.");
       });

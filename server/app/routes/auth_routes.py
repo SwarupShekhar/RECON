@@ -135,13 +135,35 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def _merge_recipients_json(a: str | None, b: str | None) -> str | None:
+    combined: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for src in (a, b):
+        if not src:
+            continue
+        try:
+            items = json.loads(src)
+        except (ValueError, TypeError):
+            continue
+        for r in items:
+            email = (r.get("email") or "").strip()
+            field = r.get("field", "to") or "to"
+            key = (email.lower(), field)
+            if email and key not in seen:
+                seen.add(key)
+                combined.append({"email": email, "field": field})
+    if not combined:
+        return a or b
+    return json.dumps(combined)
+
+
 def _dedupe_dashboard_rows(rows: list) -> list:
     """Collapse accidental double-/track rows from the same Gmail send."""
     kept: list = []
     index_by_key: dict = {}
 
     for row in rows:
-        email, total_opens, verified_opens = row
+        email, total_opens, verified_opens = row[0], row[1], row[2]
         created = email.created_at
         bucket = None
         if created:
@@ -151,11 +173,12 @@ def _dedupe_dashboard_rows(rows: list) -> list:
         key = (email.subject, email.thread_id, bucket)
         if key in index_by_key:
             prev_idx = index_by_key[key]
-            prev_email, prev_opens, prev_verified = kept[prev_idx]
+            prev_email, prev_opens, prev_verified = kept[prev_idx][0], kept[prev_idx][1], kept[prev_idx][2]
+            merged = _merge_recipients_json(prev_email.all_recipients, email.all_recipients)
+            if merged:
+                prev_email.all_recipients = merged
             if (total_opens or 0) > (prev_opens or 0):
-                kept[prev_idx] = row
-            elif (total_opens or 0) == (prev_opens or 0) and email.all_recipients and not prev_email.all_recipients:
-                kept[prev_idx] = row
+                kept[prev_idx] = (prev_email, total_opens, verified_opens) + tuple(row[3:])
             continue
         index_by_key[key] = len(kept)
         kept.append(row)
@@ -175,11 +198,17 @@ def _grouped_recipients(all_recipients_json: str | None, fallback_email: str):
             recips = []
 
     groups: dict[str, list[str]] = {"to": [], "cc": [], "bcc": []}
+    seen_emails: set[tuple[str, str]] = set()
     for r in recips:
         email = (r.get("email") or "").strip()
         if not email:
             continue
-        groups.setdefault(r.get("field", "to"), []).append(email)
+        field = r.get("field", "to") or "to"
+        key = (email.lower(), field)
+        if key in seen_emails:
+            continue
+        seen_emails.add(key)
+        groups.setdefault(field, []).append(email)
 
     ordered = [(field, groups[field]) for field in ("to", "cc", "bcc") if groups.get(field)]
     if not ordered and fallback_email:
@@ -187,83 +216,45 @@ def _grouped_recipients(all_recipients_json: str | None, fallback_email: str):
     return ordered
 
 
-# ---------------------------------------------------------------------------
-# Auth flow
-# ---------------------------------------------------------------------------
+async def _load_dashboard_data(user: User, db: AsyncSession) -> tuple[list[dict], dict]:
+    """Single round-trip dashboard query with correlated subqueries for last-open and clicks."""
+    last_opened_sq = (
+        select(func.max(Open.opened_at))
+        .where(Open.email_id == Email.id, Open.internal == False)
+        .correlate(Email)
+        .scalar_subquery()
+    )
+    link_clicks_sq = (
+        select(func.count(LinkClick.id))
+        .select_from(Link)
+        .join(LinkClick, Link.id == LinkClick.link_id)
+        .where(Link.email_id == Email.id, LinkClick.internal == False)
+        .correlate(Email)
+        .scalar_subquery()
+    )
 
-@router.get("/login", response_class=HTMLResponse)
-async def login(request: Request):
-    return templates.TemplateResponse("login.html", {"request": request})
-
-
-@router.get("/auth/callback")
-async def auth_callback():
-    # Not on the critical path — Clerk's mounted <SignIn/> navigates to
-    # /dashboard client-side once the session is confirmed. Kept as a
-    # harmless fallback in case a Clerk dashboard setting ever targets it.
-    return RedirectResponse(url="/dashboard")
-
-
-@router.post("/auth/logout")
-async def auth_logout():
-    # Clerk's own session (on Clerk's domain) is what must actually be
-    # invalidated — that happens client-side via Clerk.signOut() before this
-    # is called (see base.html). This just clears our copy of the cookie.
-    response = RedirectResponse(url="/login")
-    response.delete_cookie("__session")
-    return response
-
-
-# ---------------------------------------------------------------------------
-# Dashboard pages
-# ---------------------------------------------------------------------------
-
-@router.get("/dashboard", response_class=HTMLResponse)
-async def dashboard_page(
-    request: Request,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
     result = await db.execute(
         select(
             Email,
             func.count(Open.id).filter(Open.internal == False).label("total_opens"),
             func.count(Open.id).filter(Open.verified == True, Open.internal == False).label("verified_opens"),
+            last_opened_sq.label("last_opened"),
+            link_clicks_sq.label("link_clicks"),
         )
         .outerjoin(Open, Email.id == Open.email_id)
         .where(Email.sender_email == user.email)
         .group_by(Email.id)
         .order_by(Email.created_at.desc())
+        .limit(200)
     )
-    rows = result.all()
-    rows = _dedupe_dashboard_rows(rows)
-    email_ids = [email.id for email, _, _ in rows]
+    rows = _dedupe_dashboard_rows(result.all())
 
-    last_opened_map: dict = {}
-    if email_ids:
-        lo_result = await db.execute(
-            select(Open.email_id, func.max(Open.opened_at))
-            .where(Open.email_id.in_(email_ids), Open.internal == False)
-            .group_by(Open.email_id)
-        )
-        last_opened_map = dict(lo_result.all())
-
-    link_clicks_map: dict = {}
-    if email_ids:
-        lc_result = await db.execute(
-            select(Link.email_id, func.count(LinkClick.id))
-            .join(LinkClick, Link.id == LinkClick.link_id)
-            .where(Link.email_id.in_(email_ids), LinkClick.internal == False)
-            .group_by(Link.email_id)
-        )
-        link_clicks_map = dict(lc_result.all())
-
-    emails = []
+    emails: list[dict] = []
     stats = {"total": 0, "opened": 0, "needs_followup": 0, "clicked": 0}
-    for email, total_opens, verified_opens in rows:
+    for email, total_opens, verified_opens, last_opened, link_clicks in rows:
         total_opens = total_opens or 0
         verified_opens = verified_opens or 0
-        link_clicks = link_clicks_map.get(email.id, 0) or 0
+        link_clicks = link_clicks or 0
         followup = _needs_followup(email.created_at, total_opens)
         filter_tags = []
         if followup:
@@ -288,15 +279,104 @@ async def dashboard_page(
             "created_at": email.created_at,
             "total_opens": total_opens,
             "verified_opens": verified_opens,
-            "last_opened": last_opened_map.get(email.id),
+            "last_opened": last_opened,
             "link_clicks": link_clicks,
             "needs_followup": followup,
             "filter_tags": " ".join(filter_tags),
         })
         stats["total"] += 1
 
+    return emails, stats
+
+
+def _serialize_dashboard_row(e: dict) -> dict:
+    """JSON-safe row for /dashboard/data (pre-formatted display strings)."""
+    created = e["created_at"]
+    last_opened = e["last_opened"]
+    opens_display = "—"
+    if e["total_opens"] > 0:
+        opens_display = str(e["total_opens"])
+        if last_opened:
+            opens_display += f" · {_time_ago(last_opened)}"
+
+    status = "unread"
+    if e["verified_opens"] > 0:
+        status = "read"
+    elif e["total_opens"] > 0:
+        status = "unverified"
+    elif e["needs_followup"]:
+        status = "followup"
+
+    recip_flat = []
+    for field, addrs in e["recipients"]:
+        for addr in addrs:
+            recip_flat.append({"field": field, "email": addr})
+
+    return {
+        "id": e["id"],
+        "subject": e["subject"] or "(no subject)",
+        "recipients": recip_flat,
+        "sent_ago": _time_ago(created) if created else "—",
+        "sent_title": created.strftime("%b %d, %Y %H:%M") if created else "",
+        "opens": opens_display,
+        "clicks": str(e["link_clicks"]) if e["link_clicks"] > 0 else "—",
+        "status": status,
+        "has_clicks": e["link_clicks"] > 0,
+        "needs_followup": e["needs_followup"],
+        "filter_tags": e["filter_tags"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Auth flow
+# ---------------------------------------------------------------------------
+
+@router.get("/login", response_class=HTMLResponse)
+async def login(request: Request):
+    return templates.TemplateResponse("login.html", {"request": request})
+
+
+@router.get("/auth/callback")
+async def auth_callback():
+    # Not on the critical path — Clerk's mounted <SignIn/> navigates to
+    # /dashboard client-side once the session is confirmed. Kept as a
+    # harmless fallback in case a Clerk dashboard setting ever targets it.
+    return RedirectResponse(url="/dashboard")
+
+
+@router.post("/auth/logout")
+async def auth_logout():
+    # Clears the session cookie set by Clerk during sign-in on /login.
+    response = RedirectResponse(url="/login")
+    response.delete_cookie("__session")
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Dashboard pages
+# ---------------------------------------------------------------------------
+
+@router.get("/dashboard", response_class=HTMLResponse)
+async def dashboard_page(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    emails, stats = await _load_dashboard_data(user, db)
     return templates.TemplateResponse("dashboard.html", {
         "request": request, "emails": emails, "stats": stats, "user": user,
+    })
+
+
+@router.get("/dashboard/data")
+async def dashboard_data(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    emails, stats = await _load_dashboard_data(user, db)
+    return JSONResponse({
+        "stats": stats,
+        "emails": [_serialize_dashboard_row(e) for e in emails],
     })
 
 
@@ -350,6 +430,7 @@ async def email_detail_page(
         "request": request,
         "user": user,
         "email": email,
+        "recipients": _grouped_recipients(email.all_recipients, email.recipient_email),
         "opens": opens,
         "external_opens": external_opens,
         "verified_opens": verified_opens,

@@ -23,9 +23,23 @@
 </div>
 
 <div class="detail-grid">
-  <div class="detail-card">
-    <div class="detail-card-label">Recipient</div>
-    <div class="detail-card-value">{{ email.recipient_email }}</div>
+  <div class="detail-card" style="grid-column: 1 / -1;">
+    <div class="detail-card-label">Recipients</div>
+    <div class="detail-card-value">
+      <div class="recip-chips" style="max-width:none;">
+        {% for field, addrs in recipients %}
+          {% for addr in addrs %}
+          <span class="recip-chip recip-chip-{{ field }}" title="{{ field|title }}: {{ addr }}">
+            <span class="recip-chip-field">{{ field|title }}</span>
+            <span class="recip-chip-email">{{ addr }}</span>
+          </span>
+          {% endfor %}
+        {% endfor %}
+      </div>
+      <p class="text-muted" style="margin-top:10px;font-size:0.75rem;">
+        One open per send — Gmail uses the same pixel for all recipients on this email.
+      </p>
+    </div>
   </div>
   <div class="detail-card">
     <div class="detail-card-label">Sent</div>

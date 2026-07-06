@@ -90,6 +90,7 @@
     tbody tr.row-clickable { cursor: pointer; }
     tbody tr.row-followup td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
     tbody tr.is-hidden { display: none; }
+    .is-hidden { display: none !important; }
 
     .status-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; flex-shrink: 0; vertical-align: middle; }
     .status-dot.opened { background: var(--accent); }
@@ -142,11 +143,51 @@
       .recon-logo-sweep { animation: none; opacity: 0; }
     }
 
-    .recip-chips { display: flex; flex-wrap: wrap; gap: 5px; max-width: 34ch; }
-    .recip-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 0.75rem; color: var(--text); background: color-mix(in oklch, var(--text) 6%, transparent); border: 1px solid var(--border); border-radius: 20px; padding: 2px 9px; white-space: nowrap; }
-    .recip-chip-cc { background: var(--accent-soft); border-color: transparent; }
-    .recip-chip-bcc { background: color-mix(in oklch, var(--warn) 14%, transparent); border-color: transparent; }
-    .recip-chip-field { font-size: 0.5625rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; opacity: 0.65; }
+    .recip-chips { display: flex; flex-wrap: wrap; gap: 6px; max-width: 42ch; }
+    .recip-chip {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 0.75rem; line-height: 1.2;
+      border: 1px solid transparent; border-radius: 999px;
+      padding: 3px 10px 3px 8px; white-space: nowrap; max-width: 100%;
+    }
+    .recip-chip-email { overflow: hidden; text-overflow: ellipsis; }
+    .recip-chip-field {
+      font-size: 0.5625rem; font-weight: 700; letter-spacing: 0.05em;
+      text-transform: uppercase; opacity: 0.72; flex-shrink: 0;
+    }
+    /* Muted role colors — To green, Cc amber, Bcc lavender */
+    .recip-chip-to {
+      background: oklch(95% 0.035 145);
+      border-color: oklch(88% 0.05 145);
+      color: oklch(36% 0.055 145);
+    }
+    .recip-chip-cc {
+      background: oklch(96% 0.04 92);
+      border-color: oklch(88% 0.055 92);
+      color: oklch(38% 0.05 85);
+    }
+    .recip-chip-bcc {
+      background: oklch(95% 0.03 295);
+      border-color: oklch(87% 0.04 295);
+      color: oklch(40% 0.045 295);
+    }
+    @media (prefers-color-scheme: dark) {
+      .recip-chip-to {
+        background: oklch(28% 0.04 145);
+        border-color: oklch(36% 0.05 145);
+        color: oklch(82% 0.06 145);
+      }
+      .recip-chip-cc {
+        background: oklch(30% 0.035 92);
+        border-color: oklch(38% 0.045 92);
+        color: oklch(84% 0.06 90);
+      }
+      .recip-chip-bcc {
+        background: oklch(28% 0.03 295);
+        border-color: oklch(36% 0.04 295);
+        color: oklch(83% 0.05 295);
+      }
+    }
 
     .badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 0.6875rem; font-weight: 600; }
     .badge-accent { background: var(--accent-soft); color: var(--accent); }
@@ -217,15 +258,10 @@
   </div>
 
   <script>
-    function reconInitClerk() {
-      window.Clerk.load();
-    }
     function reconLogout() {
-      if (window.Clerk && window.Clerk.session) {
-        window.Clerk.signOut().then(function () { window.location.href = "/login"; });
-      } else {
-        window.location.href = "/login";
-      }
+      fetch("/auth/logout", { method: "POST", credentials: "same-origin" })
+        .then(function () { window.location.href = "/login?signed_out=1"; })
+        .catch(function () { window.location.href = "/login?signed_out=1"; });
     }
     function reconCopyText(text, btn) {
       navigator.clipboard.writeText(text).then(function () {
@@ -255,12 +291,5 @@
     }
   </script>
   {% block page_scripts %}{% endblock %}
-  <script
-    async
-    crossorigin="anonymous"
-    data-clerk-publishable-key="{{ clerk_publishable_key }}"
-    src="{{ clerk_js_url }}"
-    onload="reconInitClerk()"
-  ></script>
 </body>
 </html>

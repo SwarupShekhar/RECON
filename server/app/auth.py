@@ -20,6 +20,14 @@ _jwks_fetched_at: float = 0.0
 _JWKS_CACHE_TTL = 3600  # 1 hour
 
 
+async def warm_jwks_cache() -> None:
+    """Pre-load JWKS on startup so the first dashboard request isn't blocked."""
+    try:
+        await _fetch_jwks()
+    except Exception:
+        pass
+
+
 async def _fetch_jwks() -> dict:
     global _jwks_cache, _jwks_fetched_at
     now = time.time()

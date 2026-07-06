@@ -72,6 +72,10 @@ async def _monthly_report_job() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from .auth import warm_jwks_cache
+
+    await warm_jwks_cache()
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         try:
@@ -124,7 +128,7 @@ def _api_style_response(request: Request) -> bool:
     path = request.url.path
     return path.startswith((
         "/status", "/track", "/me", "/debug", "/reports", "/mute", "/health",
-    )) or path.startswith("/t/") or path.startswith("/l/")
+    )) or path.startswith("/t/") or path.startswith("/l/") or path == "/dashboard/data"
 
 
 @app.exception_handler(StarletteHTTPException)
