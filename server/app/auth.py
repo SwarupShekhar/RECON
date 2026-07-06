@@ -27,20 +27,36 @@ async def _fetch_jwks() -> dict:
         return _jwks_cache
 
     jwks_url = os.environ.get("CLERK_JWKS_URL", "").strip()
-    if not jwks_url:
-        raise HTTPException(status_code=500, detail="CLERK_JWKS_URL not configured")
+    secret = os.environ.get("CLERK_SECRET_KEY", "").strip()
+    if not jwks_url and not secret:
+        raise HTTPException(status_code=500, detail="CLERK_JWKS_URL or CLERK_SECRET_KEY required")
 
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(jwks_url)
-            resp.raise_for_status()
-            _jwks_cache = resp.json()
-            _jwks_fetched_at = now
-            return _jwks_cache
-    except Exception as exc:
-        if _jwks_cache:
-            return _jwks_cache
-        raise HTTPException(status_code=503, detail=f"Could not fetch Clerk JWKS: {exc}") from exc
+    # Try Clerk Backend API first (works even when custom Frontend API TLS is misconfigured).
+    attempts: list[tuple[str, dict[str, str]]] = []
+    if secret:
+        attempts.append(("https://api.clerk.com/v1/jwks", {"Authorization": f"Bearer {secret}"}))
+    if jwks_url:
+        attempts.append((jwks_url, {}))
+
+    last_exc: Exception | None = None
+    for url, headers in attempts:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(url, headers=headers)
+                resp.raise_for_status()
+                _jwks_cache = resp.json()
+                _jwks_fetched_at = now
+                return _jwks_cache
+        except Exception as exc:
+            last_exc = exc
+            continue
+
+    if _jwks_cache:
+        return _jwks_cache
+    raise HTTPException(
+        status_code=503,
+        detail=f"Could not fetch Clerk JWKS: {last_exc}",
+    ) from last_exc
 
 
 def _get_signing_key(jwks: dict, kid: str):
@@ -115,8 +131,6 @@ async def get_current_user(
 ) -> User:
     """Dashboard auth dependency. Reads the Clerk session token from the
     __session cookie or Authorization header, verifies it, loads/creates User."""
-    await _fetch_jwks()
-
     session_token = request.cookies.get("__session", "")
     if not session_token:
         auth_header = request.headers.get("authorization", "")
@@ -125,6 +139,8 @@ async def get_current_user(
 
     if not session_token:
         raise HTTPException(status_code=401, detail="Not authenticated")
+
+    await _fetch_jwks()
 
     claims = verify_clerk_session(session_token)
     clerk_user_id = claims.get("sub", "")
