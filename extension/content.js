@@ -124,42 +124,49 @@
     return null;
   }
 
+  function extractEmailsFromString(str) {
+    if (!str) return [];
+    const matches = String(str).match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g);
+    return matches || [];
+  }
+
   function getRecipientEmails(container) {
     const results = [];
     const seen = new Set();
 
-    const fieldFromLabel = (label) => {
-      const l = (label || "").trim().toLowerCase();
-      if (l.startsWith("cc")) return "cc";
-      if (l.startsWith("bcc")) return "bcc";
-      if (l.startsWith("to")) return "to";
-      return null;
-    };
-
     const addChip = (email, field) => {
-      if (email && !seen.has(email)) {
-        seen.add(email);
-        results.push({ email, field });
-      }
+      if (!email) return;
+      const norm = String(email).trim().toLowerCase();
+      if (!norm || seen.has(norm)) return;
+      seen.add(norm);
+      results.push({ email: norm, field });
     };
 
-    // Prefer Gmail's labeled recipient rows (To / Cc / Bcc).
-    container.querySelectorAll("[aria-label]").forEach((el) => {
-      const field = fieldFromLabel(el.getAttribute("aria-label"));
-      if (!field) return;
-      el.querySelectorAll("span[email]").forEach((chip) => {
-        addChip(chip.getAttribute("email"), field);
+    // Method 1 (most reliable): Gmail keeps form inputs named to/cc/bcc whose
+    // value is the actual outgoing address list. Chip DOM scraping is fragile
+    // and field grouping there is unreliable; the input values are not.
+    [
+      ["to", 'input[name="to"]'],
+      ["cc", 'input[name="cc"]'],
+      ["bcc", 'input[name="bcc"]'],
+    ].forEach(([field, sel]) => {
+      container.querySelectorAll(sel).forEach((input) => {
+        extractEmailsFromString(input.value).forEach((e) => addChip(e, field));
       });
     });
 
-    const toInput = container.querySelector('input[aria-label="To recipients"]') ||
-      container.querySelector('input[name="to"]');
-    const ccInput = container.querySelector('input[aria-label="Cc recipients"]') ||
-      container.querySelector('input[name="cc"]');
-    const bccInput = container.querySelector('input[aria-label="Bcc recipients"]') ||
-      container.querySelector('input[name="bcc"]');
+    // Method 2: labeled recipient rows / their chips, keyed to whichever
+    // field the closest textbox's aria-label identifies. Covers the case
+    // where the hidden inputs aren't populated yet at send time.
+    const fieldFromLabel = (label) => {
+      const l = (label || "").trim().toLowerCase();
+      if (l.startsWith("cc") || l.includes("cc recipients")) return "cc";
+      if (l.startsWith("bcc") || l.includes("bcc recipients")) return "bcc";
+      if (l.startsWith("to") || l.includes("to recipients")) return "to";
+      return null;
+    };
 
-    const addChips = (input, field) => {
+    const addChipsScopedTo = (input, field) => {
       if (!input) return;
       const parent = input.closest('div[role="list"]') || input.parentElement;
       if (!parent) return;
@@ -168,10 +175,31 @@
       });
     };
 
-    addChips(toInput, "to");
-    addChips(ccInput, "cc");
-    addChips(bccInput, "bcc");
+    addChipsScopedTo(
+      container.querySelector('input[aria-label="To recipients"]') ||
+        container.querySelector('input[name="to"]'),
+      "to"
+    );
+    addChipsScopedTo(
+      container.querySelector('input[aria-label="Cc recipients"]') ||
+        container.querySelector('input[name="cc"]'),
+      "cc"
+    );
+    addChipsScopedTo(
+      container.querySelector('input[aria-label="Bcc recipients"]') ||
+        container.querySelector('input[name="bcc"]'),
+      "bcc"
+    );
 
+    container.querySelectorAll("[aria-label]").forEach((el) => {
+      const field = fieldFromLabel(el.getAttribute("aria-label"));
+      if (!field) return;
+      el.querySelectorAll("span[email]").forEach((chip) => {
+        addChip(chip.getAttribute("email"), field);
+      });
+    });
+
+    // Method 3: last resort — every chip we can find, attributed to To.
     if (results.length === 0) {
       container.querySelectorAll("span[email]").forEach((chip) => {
         addChip(chip.getAttribute("email"), "to");
