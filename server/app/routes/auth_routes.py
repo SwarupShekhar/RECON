@@ -60,6 +60,12 @@ def _resolve_clerk_frontend_api() -> str:
 _clerk_frontend_api = _resolve_clerk_frontend_api()
 templates.env.globals["clerk_publishable_key"] = os.environ.get("CLERK_PUBLISHABLE_KEY", "")
 templates.env.globals["clerk_frontend_api"] = _clerk_frontend_api
+# Custom Clerk domains can have TLS issues before Clerk finishes provisioning.
+# jsDelivr serves clerk-js reliably; the publishable key selects the right instance.
+templates.env.globals["clerk_js_url"] = os.environ.get(
+    "CLERK_JS_URL",
+    "https://cdn.jsdelivr.net/npm/@clerk/clerk-js@5/dist/clerk.browser.js",
+)
 
 FOLLOWUP_AFTER_DAYS = 2
 
