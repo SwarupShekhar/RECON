@@ -37,5 +37,15 @@ jobs:
           docker compose build
           docker compose up -d
           docker image prune -f
-          curl -fsS http://127.0.0.1:4050/health
+          for i in \$(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4050/health; then
+              echo "Health check passed"
+              exit 0
+            fi
+            echo "Health check attempt \$i failed, retrying in 2s..."
+            sleep 2
+          done
+          echo "Health check failed after 30 attempts"
+          docker compose logs --tail=50
+          exit 1
           EOF
