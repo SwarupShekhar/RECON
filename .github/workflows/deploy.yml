@@ -13,20 +13,29 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy over SSH
-        uses: appleboy/ssh-action@v1.2.0
+      - name: Load SSH key
+        uses: webfactory/ssh-agent@v0.9.0
         with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script_stop: true
-          script: |
-            set -euo pipefail
-            APP_DIR="${{ secrets.APP_DIR || '/opt/recon' }}"
-            cd "$APP_DIR"
-            git fetch origin main
-            git reset --hard origin/main
-            docker compose build
-            docker compose up -d
-            docker image prune -f
-            curl -fsS http://127.0.0.1:4050/health
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Trust Vultr host key
+        run: ssh-keyscan -H "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy over SSH
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          APP_DIR: ${{ secrets.APP_DIR }}
+        run: |
+          set -euo pipefail
+          APP_DIR="${APP_DIR:-/opt/recon}"
+          ssh -o BatchMode=yes "${SSH_USER}@${SSH_HOST}" bash -s <<EOF
+          set -euo pipefail
+          cd "${APP_DIR}"
+          git fetch origin main
+          git reset --hard origin/main
+          docker compose build
+          docker compose up -d
+          docker image prune -f
+          curl -fsS http://127.0.0.1:4050/health
+          EOF
