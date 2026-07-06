@@ -13,7 +13,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === "complete" && tab.url?.includes("mail.google.com")) {
     chrome.scripting.executeScript({
       target: { tabId },
-      files: ["content.js"],
+      files: ["config.defaults.js", "content.js"],
     }).catch((err) => console.error("[Recon] Inject failed:", err));
   }
 });

@@ -396,7 +396,10 @@ async def extension_key_page(
             "last_used_at": k.last_used_at,
             "revoked": k.revoked,
         })
-    return templates.TemplateResponse("extension_key.html", {"request": request, "user": user, "keys": keys, "new_key": None})
+    return templates.TemplateResponse("extension_key.html", {
+        "request": request, "user": user, "keys": keys, "new_key": None,
+        "base_url": _dashboard_base_url(request),
+    })
 
 
 @router.post("/dashboard/extension-key")
@@ -427,6 +430,7 @@ async def extension_key_generate(
 
     return templates.TemplateResponse("extension_key.html", {
         "request": request, "user": user, "keys": keys, "new_key": raw_key,
+        "base_url": _dashboard_base_url(request),
     })
 
 

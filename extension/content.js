@@ -14,8 +14,12 @@
 
   let config = { serverUrl: "", senderEmail: "", apiKey: "" };
 
+  function defaultServerUrl() {
+    return (typeof RECON_DEFAULT_SERVER_URL === "string" && RECON_DEFAULT_SERVER_URL) || "";
+  }
+
   chrome.storage.sync.get(["serverUrl", "senderEmail", "apiKey"], (data) => {
-    config.serverUrl = data.serverUrl || "";
+    config.serverUrl = data.serverUrl || defaultServerUrl();
     config.senderEmail = data.senderEmail || "";
     config.apiKey = data.apiKey || "";
     console.log("[Recon] Loaded config:", config.serverUrl, config.senderEmail ? "(email set)" : "", config.apiKey ? "(api key set)" : "");
