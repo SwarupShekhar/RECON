@@ -153,11 +153,11 @@
 
   // Dumps compose recipient DOM (inputs, chips, per-chip geometry) at send
   // time so To/Cc/Bcc parsing can be debugged against real Gmail markup.
-  function debugDumpRecipients(container) {
-    // Opt-in: set window.__RECON_DEBUG_RECIPIENTS = true in the Gmail console
-    // to dump compose recipient DOM (inputs, chips, geometry, field
-    // containers) at send time for To/Cc/Bcc debugging.
-    if (!window.__RECON_DEBUG_RECIPIENTS) return;
+  function debugDumpRecipients(container, force) {
+    // Runs when window.__RECON_DEBUG_RECIPIENTS is set, OR when forced (e.g.
+    // parsing found no recipients — auto-capture the DOM so it can be fixed
+    // from a real failure without the user toggling a flag first).
+    if (!force && !window.__RECON_DEBUG_RECIPIENTS) return;
     try {
       const info = { inputs: [], chipCount: 0, ariaLabels: [], chips: [] };
       // Every recipient-ish input by name OR aria-label, with its value — shows
@@ -401,7 +401,13 @@
       selectors.forEach((sel) => {
         container.querySelectorAll(sel).forEach((fc) => {
           fc.querySelectorAll(CHIP_SELECTOR).forEach((chipEl) => {
-            if (!isCommittedRecipientChip(chipEl, container)) return;
+            // No visibility check and no suggestion filter here — both proven
+            // wrong against live Gmail (diag 2026-07-07): at send-click the
+            // editor is collapsed so chips report 0x0 rects, and committed
+            // chips are role="option" inside a role="listbox" (the same roles
+            // the suggestion dropdown uses, so isAutocompleteSuggestion eats
+            // real recipients). Being inside the [aria-label="To"|"Cc"|"Bcc"]
+            // container IS the commitment signal; the dropdown lives outside.
             const email = emailFromChipEl(chipEl);
             if (!email) return;
             const norm = email.trim().toLowerCase();
@@ -469,6 +475,48 @@
         if (!field) return;
         extractEmailsFromString(input.value).forEach((e) => record(e, field, 2));
       });
+    }
+
+    // Last-resort catch-all: the gated methods above all require a chip to sit
+    // inside a [aria-label="To"|"Cc"|"Bcc"] container. Some Gmail layouts nest
+    // chips differently, so every chip gets rejected and we track nothing.
+    // Here we accept ANY non-suggestion recipient chip found in the compose or
+    // its surrounding dialog, so a real send is never dropped. Field defaults
+    // to "to" (attribution is best-effort in this fallback) — but the email
+    // gets tracked, which is the priority.
+    if (byEmail.size === 0) {
+      const roots = [container];
+      const dialog = container.closest('div[role="dialog"]');
+      if (dialog && dialog !== container) roots.push(dialog);
+      // Exclude the sender's own address(es): the configured one AND whatever
+      // the compose From row shows — they can differ (send-as / aliases), and
+      // the From chip matches CHIP_SELECTOR just like recipient chips do.
+      const ownAddresses = new Set();
+      const configured = (config.senderEmail || "").trim().toLowerCase();
+      if (configured) ownAddresses.add(configured);
+      roots.forEach((root) => {
+        root.querySelectorAll('input[name="from"], [aria-label*="From"] [email], span.gD[email]').forEach((el) => {
+          const v = el.value || el.getAttribute("email") || "";
+          extractEmailsFromString(v).forEach((e) => ownAddresses.add(e.toLowerCase()));
+        });
+      });
+      roots.forEach((root) => {
+        root.querySelectorAll(CHIP_SELECTOR).forEach((chip) => {
+          if (isAutocompleteSuggestion(chip)) return;
+          const email = emailFromChipEl(chip);
+          if (!email) return;
+          const norm = email.trim().toLowerCase();
+          if (ownAddresses.has(norm)) return;
+          const geometric = fieldForChipByGeometry(chip, fieldRows);
+          record(norm, geometric || "to", geometric ? 4 : 0);
+        });
+      });
+      if (byEmail.size > 0) {
+        console.log("[Recon] Recipients recovered via catch-all chip scan");
+        // The precise parser failed — flag it so handleSend dumps the DOM and
+        // we can fix field attribution from real markup instead of guessing.
+        container._reconUsedCatchAll = true;
+      }
     }
 
     return sortRecipients(
@@ -596,16 +644,28 @@
     }
 
     debugDumpRecipients(container);
+    container._reconUsedCatchAll = false;
     let recipients = getRecipientEmails(container);
-    if (recipients.length === 0 && container._reconRecipientSnapshot) {
-      // Gmail collapsed the recipient editor between mousedown and click —
-      // fall back to the snapshot taken on mousedown (while it was expanded).
-      recipients = container._reconRecipientSnapshot;
+    const snapshot = container._reconRecipientSnapshot;
+    // The mousedown snapshot was taken while the editor was still expanded, so
+    // it can be strictly better than the click-time read (which may have hit
+    // the collapsed DOM and recovered fewer recipients via catch-all).
+    if (snapshot && snapshot.length > recipients.length) {
+      recipients = snapshot;
       console.log("[Recon] Using recipient snapshot from mousedown");
     }
     if (recipients.length === 0) {
       console.warn("[Recon] No recipients found");
+      // Auto-capture the compose DOM so the parser can be fixed from a real
+      // failure without the user needing to toggle a debug flag first.
+      debugDumpRecipients(container, true);
       return;
+    }
+    if (container._reconUsedCatchAll) {
+      // Tracking succeeded but only via the last-resort scan — the precise
+      // To/Cc/Bcc parser failed on this DOM. Dump it so attribution can be
+      // fixed from real markup.
+      debugDumpRecipients(container, true);
     }
 
     const subject = getSubject(container);
