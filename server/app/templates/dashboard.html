@@ -96,12 +96,12 @@
           </td>
           <td>
             <span class="status-cell">
-              {% if e.verified_opens > 0 %}
+              {% if e.human_likely_opens > 0 %}
                 <span class="status-dot opened" aria-hidden="true"></span>
                 <span class="status-label">Read</span>
-              {% elif e.total_opens > 0 %}
+              {% elif e.proxy_or_preload_opens > 0 %}
                 <span class="status-dot unverified" aria-hidden="true"></span>
-                <span class="status-label warn">Unverified</span>
+                <span class="status-label warn">Preloaded</span>
               {% elif e.needs_followup %}
                 <span class="status-dot none" aria-hidden="true"></span>
                 <span class="status-label danger">Follow up</span>
@@ -160,8 +160,8 @@
     var html = '<span class="status-cell">';
     if (row.status === "read") {
       html += '<span class="status-dot opened" aria-hidden="true"></span><span class="status-label">Read</span>';
-    } else if (row.status === "unverified") {
-      html += '<span class="status-dot unverified" aria-hidden="true"></span><span class="status-label warn">Unverified</span>';
+    } else if (row.status === "preloaded") {
+      html += '<span class="status-dot unverified" aria-hidden="true"></span><span class="status-label warn">Preloaded</span>';
     } else if (row.status === "followup") {
       html += '<span class="status-dot none" aria-hidden="true"></span><span class="status-label danger">Follow up</span>';
     } else {

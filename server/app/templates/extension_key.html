@@ -13,11 +13,6 @@
     <code class="key-reveal-value" style="flex:1;">{{ new_key }}</code>
     <button type="button" class="btn btn-secondary" style="flex-shrink:0;" onclick="reconCopyText('{{ new_key }}', this)">Copy</button>
   </div>
-  <div class="text-muted" style="margin-top:12px;">Or copy a full bundle and import it in the extension popup:</div>
-  <div class="flex" style="gap:10px;align-items:stretch;margin-top:8px;">
-    <code id="config-bundle" class="key-reveal-value" style="flex:1;white-space:normal;word-break:break-all;">{"serverUrl":"{{ base_url }}","apiKey":"{{ new_key }}","senderEmail":"{{ user.email }}"}</code>
-    <button type="button" class="btn btn-secondary" style="flex-shrink:0;" onclick="reconCopyText(document.getElementById('config-bundle').textContent, this)">Copy Bundle</button>
-  </div>
 </div>
 {% endif %}
 
@@ -26,7 +21,7 @@
     <button type="submit" class="btn btn-primary">Generate New Key</button>
   </form>
 </div>
-<p class="text-muted mb-16">Tip: extension upgrades keep saved keys automatically. If a key disappears, paste the copied bundle in popup and click <strong>Import Bundle</strong>.</p>
+<p class="text-muted mb-16">Tip: extension upgrades keep saved keys automatically. If a key disappears, paste the API key again in popup and click <strong>Save</strong>.</p>
 
 {% if keys %}
 <h2>Existing Keys</h2>

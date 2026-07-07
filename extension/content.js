@@ -40,8 +40,24 @@
   // render + read time, re-muting on every poll isn't needed.
   const mutedThreadIds = new Set();
 
+  // After the extension is reloaded/updated, content scripts already injected
+  // into open Gmail tabs are orphaned: `chrome.runtime` still exists but has no
+  // `id`, and any sendMessage throws "Extension context invalidated". Guard the
+  // messaging entry points so an orphaned script degrades quietly (and reminds
+  // the user to refresh the tab) instead of throwing mid-send.
+  function runtimeAlive() {
+    try {
+      if (chrome.runtime && chrome.runtime.id) return true;
+    } catch (err) {
+      /* accessing chrome.runtime can itself throw once invalidated */
+    }
+    console.warn("[Recon] Extension context invalidated — reload this Gmail tab (Cmd+R).");
+    return false;
+  }
+
   function muteThread(threadId) {
     if (!threadId || !config.serverUrl || mutedThreadIds.has(threadId)) return;
+    if (!runtimeAlive()) return;
     mutedThreadIds.add(threadId);
     chrome.runtime.sendMessage(
       { type: "mute", serverUrl: config.serverUrl, threadId, seconds: 30 },
@@ -58,6 +74,7 @@
   // covers new composes the same way muteThread covers Sent-list clicks.
   function muteEmails(emailIds) {
     if (!emailIds || emailIds.length === 0 || !config.serverUrl) return;
+    if (!runtimeAlive()) return;
     chrome.runtime.sendMessage(
       { type: "mute", serverUrl: config.serverUrl, emailIds, seconds: 30 },
       () => void chrome.runtime.lastError
@@ -73,6 +90,10 @@
   // registration, its timing no longer affects what gets sent.
   async function registerTracker(trackerId, recipientEmail, subject, threadId, field, links, allRecipients) {
     return new Promise((resolve, reject) => {
+      if (!runtimeAlive()) {
+        reject(new Error("Extension context invalidated — reload the Gmail tab."));
+        return;
+      }
       const payload = {
         id: trackerId,
         sender_email: config.senderEmail,
@@ -130,16 +151,29 @@
     return matches || [];
   }
 
-  // One-shot DOM reconnaissance: Gmail's compose recipient markup is
-  // undocumented and we can't inspect it remotely. This logs exactly where
-  // To/Cc/Bcc live so the selectors can be made precise from a real send.
+  // Dumps compose recipient DOM (inputs, chips, per-chip geometry) at send
+  // time so To/Cc/Bcc parsing can be debugged against real Gmail markup.
   function debugDumpRecipients(container) {
+    // Opt-in: set window.__RECON_DEBUG_RECIPIENTS = true in the Gmail console
+    // to dump compose recipient DOM (inputs, chips, geometry, field
+    // containers) at send time for To/Cc/Bcc debugging.
+    if (!window.__RECON_DEBUG_RECIPIENTS) return;
     try {
-      const info = { inputs: {}, ariaLabels: [], chips: [] };
-      ["to", "cc", "bcc"].forEach((f) => {
-        const el = container.querySelector(`input[name="${f}"]`);
-        info.inputs[f] = el ? { found: true, value: el.value || "" } : { found: false };
+      const info = { inputs: [], chipCount: 0, ariaLabels: [], chips: [] };
+      // Every recipient-ish input by name OR aria-label, with its value — shows
+      // whether Gmail populated to/cc/bcc at send-click and where each lives.
+      container.querySelectorAll("input,textarea").forEach((el) => {
+        const name = el.getAttribute("name") || "";
+        const aria = el.getAttribute("aria-label") || "";
+        if (/^(to|cc|bcc)$/i.test(name) || /recipient|\bto\b|\bcc\b|\bbcc\b/i.test(aria)) {
+          const r = el.getBoundingClientRect();
+          info.inputs.push({
+            name, aria, value: el.value || "",
+            top: Math.round(r.top), h: Math.round(r.height),
+          });
+        }
       });
+      info.chipCount = container.querySelectorAll("span[email]").length;
       container.querySelectorAll("[aria-label]").forEach((el) => {
         const al = el.getAttribute("aria-label") || "";
         if (/recipient|cc|bcc|\bto\b/i.test(al) && info.ariaLabels.length < 25) {
@@ -159,80 +193,253 @@
           if (nm) { hint = { depth: i, attr: nm, tag: node.tagName }; break; }
           node = node.parentElement;
         }
-        info.chips.push({ email: chip.getAttribute("email"), hint });
+        const fieldRows = collectRecipientFieldRows(container);
+        const rect = chip.getBoundingClientRect();
+        info.chips.push({
+          email: chip.getAttribute("email"),
+          hint,
+          geometry: {
+            top: Math.round(rect.top),
+            field: fieldForChipByGeometry(chip, fieldRows),
+            rows: fieldRows.map((r) => ({ field: r.field, mid: Math.round(r.mid) })),
+          },
+          preceding: fieldForChipByPrecedingInput(chip, container),
+        });
       });
+      // Field-container view (Method 0): where the real fix reads from. Shows,
+      // per aria-labeled field container, which chip addresses live under it.
+      info.fieldContainers = [];
+      [
+        ["to", '[aria-label="To"]'],
+        ["cc", '[aria-label="Cc"]'],
+        ["bcc", '[aria-label="Bcc"]'],
+      ].forEach(([field, sel]) => {
+        container.querySelectorAll(sel).forEach((fc) => {
+          const emails = [];
+          fc.querySelectorAll(CHIP_SELECTOR).forEach((chipEl) => {
+            const e = emailFromChipEl(chipEl);
+            if (e && !emails.includes(e)) emails.push(e);
+          });
+          info.fieldContainers.push({ field, sel, emails });
+        });
+      });
+      info.method0 = collectRecipientsByFieldContainer(container);
       console.log("[Recon][diag] recipient DOM ->", JSON.stringify(info, null, 2));
     } catch (e) {
       console.warn("[Recon][diag] dump failed:", e);
     }
   }
 
-  function getRecipientEmails(container) {
-    const results = [];
-    const seen = new Set();
-
-    const addChip = (email, field) => {
-      if (!email) return;
-      const norm = String(email).trim().toLowerCase();
-      if (!norm || seen.has(norm)) return;
-      seen.add(norm);
-      results.push({ email: norm, field });
+  function recipientInputSelector(field) {
+    const labels = {
+      to: ["To recipients", "to recipients"],
+      cc: ["CC recipients", "Cc recipients", "cc recipients"],
+      bcc: ["BCC recipients", "Bcc recipients", "bcc recipients"],
     };
-
-    // Method 1 (most reliable): Gmail keeps form inputs named to/cc/bcc whose
-    // value is the actual outgoing address list. Chip DOM scraping is fragile
-    // and field grouping there is unreliable; the input values are not.
-    [
-      ["to", 'input[name="to"]'],
-      ["cc", 'input[name="cc"]'],
-      ["bcc", 'input[name="bcc"]'],
-    ].forEach(([field, sel]) => {
-      container.querySelectorAll(sel).forEach((input) => {
-        extractEmailsFromString(input.value).forEach((e) => addChip(e, field));
-      });
+    const names = labels[field] || [];
+    const parts = [`input[name="${field}"]`];
+    names.forEach((label) => {
+      parts.push(`input[aria-label="${label}"]`);
     });
+    return parts.join(", ");
+  }
 
-    // Method 2: scan the compose subtree in DOM order and track the active
-    // recipient field (To/Cc/Bcc) based on aria-label markers. Gmail's chip
-    // structure is unstable, but these labels are consistently present.
-    const fieldFromLabel = (label) => {
-      const l = (label || "").trim().toLowerCase();
-      if (l.startsWith("cc") || l.includes("cc recipients")) return "cc";
-      if (l.startsWith("bcc") || l.includes("bcc recipients")) return "bcc";
-      if (l.startsWith("to") || l.includes("to recipients")) return "to";
-      return null;
-    };
+  function fieldFromRecipientLabel(label) {
+    const l = (label || "").trim().toLowerCase();
+    if (l === "to recipients" || l === "to") return "to";
+    if (l === "cc recipients" || l === "cc") return "cc";
+    if (l === "bcc recipients" || l === "bcc") return "bcc";
+    return null;
+  }
 
-    let currentField = "to";
+  // Classify a recipient <input> element to its field via name or aria-label.
+  function inputFieldOf(input) {
+    const name = input.getAttribute("name");
+    if (name === "to" || name === "cc" || name === "bcc") return name;
+    return fieldFromRecipientLabel(input.getAttribute("aria-label") || "");
+  }
+
+  function anyRecipientInputSelector() {
+    return ["to", "cc", "bcc"].map(recipientInputSelector).join(", ");
+  }
+
+  // One row per To/Cc/Bcc field, using the best recipient input for geometry.
+  function collectRecipientFieldRows(container) {
+    const byField = new Map();
+    container.querySelectorAll(anyRecipientInputSelector()).forEach((input) => {
+      const field = inputFieldOf(input);
+      if (!field) return;
+      const aria = (input.getAttribute("aria-label") || "").toLowerCase();
+      const score =
+        input.getAttribute("name") === field ? 3 : aria.includes("recipients") ? 2 : 1;
+      const rect = input.getBoundingClientRect();
+      if (!rect.height && !rect.width) return;
+      const existing = byField.get(field);
+      if (!existing || score > existing.score) {
+        byField.set(field, {
+          field,
+          top: rect.top,
+          bottom: rect.bottom,
+          mid: rect.top + rect.height / 2,
+          score,
+        });
+      }
+    });
+    return [...byField.values()].sort((a, b) => a.top - b.top);
+  }
+
+  // Gmail often renders chips outside the input subtree. Match each chip to
+  // the To/Cc/Bcc row whose vertical center is closest to the chip's center.
+  function fieldForChipByGeometry(chip, fieldRows) {
+    if (!fieldRows.length) return null;
+    const rect = chip.getBoundingClientRect();
+    if (!rect.height && !rect.width) return null;
+    const chipMid = rect.top + rect.height / 2;
+    let best = null;
+    let bestDist = Infinity;
+    fieldRows.forEach((row) => {
+      const dist = Math.abs(chipMid - row.mid);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = row.field;
+      }
+    });
+    return best;
+  }
+
+  // For each chip, use the last recipient input seen before it in DOM order.
+  function fieldForChipByPrecedingInput(chip, container) {
+    let lastField = null;
     const walker = document.createTreeWalker(container, NodeFilter.SHOW_ELEMENT);
     let node = walker.currentNode;
     while (node) {
-      const aria = node.getAttribute?.("aria-label") || "";
-      const inferred = fieldFromLabel(aria);
-      if (inferred) currentField = inferred;
-
-      if (node.tagName === "INPUT" && aria) {
-        const inputField = fieldFromLabel(aria);
-        if (inputField) {
-          extractEmailsFromString(node.value).forEach((e) => addChip(e, inputField));
-        }
+      if (node === chip) return lastField;
+      if (node.tagName === "INPUT") {
+        const f = inputFieldOf(node);
+        if (f) lastField = f;
       }
-
-      if (node.tagName === "SPAN" && node.hasAttribute("email")) {
-        addChip(node.getAttribute("email"), currentField);
-      }
-
       node = walker.nextNode();
     }
+    return lastField;
+  }
 
-    // Method 3: last resort — every chip we can find, attributed to To.
-    if (results.length === 0) {
-      container.querySelectorAll("span[email]").forEach((chip) => {
-        addChip(chip.getAttribute("email"), "to");
+  // Broad chip matcher. Gmail does NOT always put the address on a
+  // span[email]: some chips only carry data-hovercard-id, and the chip
+  // wrapper is aria-label="Press delete to remove this chip". Matching only
+  // span[email] silently dropped co-recipients (the diag showed 2 real chips
+  // but chipCount:1). This catches all representations.
+  const CHIP_SELECTOR =
+    'span[email], [data-hovercard-id], [aria-label="Press delete to remove this chip"]';
+
+  // Pull an address off a chip element from whichever attribute Gmail used.
+  function emailFromChipEl(el) {
+    const attrEmail = el.getAttribute && el.getAttribute("email");
+    if (attrEmail && attrEmail.includes("@")) return attrEmail;
+    const hover = el.getAttribute && el.getAttribute("data-hovercard-id");
+    if (hover && hover.includes("@")) return hover;
+    const fromText = extractEmailsFromString(el.textContent);
+    if (fromText.length) return fromText[0];
+    const dataName = el.getAttribute && el.getAttribute("data-name");
+    if (dataName && dataName.includes("@")) return dataName;
+    return null;
+  }
+
+  // Most reliable path: read chips from each field's own aria-labeled
+  // container (div[aria-label="To"|"Cc"|"Bcc"]). These containers persist even
+  // after Gmail collapses the recipient editor on send-click blur (when the
+  // inputs report top:0/height:0 and geometry matching is impossible). Field
+  // is defined by which container the chip lives under — no ordering guess.
+  function collectRecipientsByFieldContainer(container) {
+    const out = [];
+    const seen = new Set();
+    const fields = [
+      ["to", ['[aria-label="To"]', '[aria-label="to"]']],
+      ["cc", ['[aria-label="Cc"]', '[aria-label="CC"]', '[aria-label="cc"]']],
+      ["bcc", ['[aria-label="Bcc"]', '[aria-label="BCC"]', '[aria-label="bcc"]']],
+    ];
+    fields.forEach(([field, selectors]) => {
+      selectors.forEach((sel) => {
+        container.querySelectorAll(sel).forEach((fc) => {
+          fc.querySelectorAll(CHIP_SELECTOR).forEach((chipEl) => {
+            const email = emailFromChipEl(chipEl);
+            if (!email) return;
+            const norm = email.trim().toLowerCase();
+            const key = norm + "|" + field;
+            if (seen.has(key)) return;
+            seen.add(key);
+            out.push({ email: norm, field });
+          });
+        });
+      });
+    });
+    return out;
+  }
+
+  function getRecipientEmails(container) {
+    // email(lowercased) -> { email, field, authority }. Highest authority wins.
+    //   5 = chip read from its field's aria-labeled container (survives collapse)
+    //   4 = chip aligned to recipient row by vertical position
+    //   3 = chip preceded by a specific recipient input in DOM order
+    //   2 = value of a named/aria recipient input
+    //   0 = last-resort default To
+    const byEmail = new Map();
+    const record = (email, field, authority) => {
+      if (!email) return;
+      const norm = String(email).trim().toLowerCase();
+      if (!norm) return;
+      const existing = byEmail.get(norm);
+      if (!existing || authority > existing.authority) {
+        byEmail.set(norm, { email: norm, field: field || "to", authority });
+      }
+    };
+
+    const fieldRows = collectRecipientFieldRows(container);
+    const selector = anyRecipientInputSelector();
+
+    // Method 0 (most reliable): chips read from their own field container.
+    // Survives the send-click collapse that zeroes the inputs/geometry.
+    collectRecipientsByFieldContainer(container).forEach((r) => record(r.email, r.field, 5));
+
+    // Method 1: hidden recipient inputs sometimes carry the full address list.
+    ["to", "cc", "bcc"].forEach((field) => {
+      container.querySelectorAll(recipientInputSelector(field)).forEach((input) => {
+        extractEmailsFromString(input.value).forEach((e) => record(e, field, 2));
+      });
+    });
+
+    // Method 2: per-chip attribution for any chip Method 0 didn't place.
+    // Broad selector so co-recipients whose address lives on data-hovercard-id
+    // (not span[email]) are still seen — that under-capture dropped Cc/Bcc.
+    const chips = container.querySelectorAll(CHIP_SELECTOR);
+    chips.forEach((chip) => {
+      const email = emailFromChipEl(chip);
+      if (!email) return;
+      const geometric = fieldForChipByGeometry(chip, fieldRows);
+      if (geometric) {
+        record(email, geometric, 4);
+        return;
+      }
+      const preceding = fieldForChipByPrecedingInput(chip, container);
+      if (preceding) {
+        record(email, preceding, 3);
+        return;
+      }
+      record(email, "to", 0);
+    });
+
+    // Method 3: last resort if no chips were found.
+    if (byEmail.size === 0) {
+      container.querySelectorAll(selector).forEach((input) => {
+        const field = inputFieldOf(input);
+        if (!field) return;
+        extractEmailsFromString(input.value).forEach((e) => record(e, field, 2));
       });
     }
 
-    return results;
+    const rank = { to: 0, cc: 1, bcc: 2 };
+    return [...byEmail.values()]
+      .map((r) => ({ email: r.email, field: r.field }))
+      .sort((a, b) => (rank[a.field] ?? 3) - (rank[b.field] ?? 3));
   }
 
   function getSubject(container) {
