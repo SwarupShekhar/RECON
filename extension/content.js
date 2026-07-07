@@ -323,7 +323,47 @@
     return lastField;
   }
 
-  // Broad chip matcher. Gmail does NOT always put the address on a
+  // Gmail autocomplete / people-picker rows — not committed recipients.
+  function isAutocompleteSuggestion(el) {
+    if (!el) return false;
+    return !!el.closest(
+      '[role="listbox"], [role="menu"], [role="option"], [data-actas="people-chip-suggestion"]'
+    );
+  }
+
+  // Only count chips the user actually added to To/Cc/Bcc (not hover suggestions).
+  function isCommittedRecipientChip(el, container) {
+    if (!el || isAutocompleteSuggestion(el)) return false;
+    const rect = el.getBoundingClientRect();
+    if (!rect.width && !rect.height) return false;
+    if (el.closest('[aria-label="Press delete to remove this chip"]')) return true;
+    if (el.getAttribute("aria-label") === "Press delete to remove this chip") return true;
+    if (el.tagName === "SPAN" && el.hasAttribute("email")) {
+      return !!el.closest(
+        '[aria-label="To"], [aria-label="to"], [aria-label="Cc"], [aria-label="CC"], ' +
+        '[aria-label="cc"], [aria-label="Bcc"], [aria-label="BCC"], [aria-label="bcc"]'
+      );
+    }
+    return false;
+  }
+
+  // Gmail's hidden to/cc/bcc inputs reflect the addresses actually sent.
+  function collectRecipientsFromInputs(container) {
+    const results = [];
+    const seen = new Set();
+    ["to", "cc", "bcc"].forEach((field) => {
+      container.querySelectorAll(recipientInputSelector(field)).forEach((input) => {
+        extractEmailsFromString(input.value).forEach((e) => {
+          const norm = e.trim().toLowerCase();
+          if (!norm || seen.has(norm)) return;
+          seen.add(norm);
+          results.push({ email: norm, field });
+        });
+      });
+    });
+    return results;
+  }
+
   // span[email]: some chips only carry data-hovercard-id, and the chip
   // wrapper is aria-label="Press delete to remove this chip". Matching only
   // span[email] silently dropped co-recipients (the diag showed 2 real chips
@@ -361,6 +401,7 @@
       selectors.forEach((sel) => {
         container.querySelectorAll(sel).forEach((fc) => {
           fc.querySelectorAll(CHIP_SELECTOR).forEach((chipEl) => {
+            if (!isCommittedRecipientChip(chipEl, container)) return;
             const email = emailFromChipEl(chipEl);
             if (!email) return;
             const norm = email.trim().toLowerCase();
@@ -376,12 +417,18 @@
   }
 
   function getRecipientEmails(container) {
+    const rank = { to: 0, cc: 1, bcc: 2 };
+    const sortRecipients = (list) =>
+      [...list].sort((a, b) => (rank[a.field] ?? 3) - (rank[b.field] ?? 3));
+
+    // Gmail's hidden to/cc/bcc input values are the send payload — they exclude
+    // autocomplete suggestions that never got added. Prefer them whenever set.
+    const fromInputs = collectRecipientsFromInputs(container);
+    if (fromInputs.length > 0) {
+      return sortRecipients(fromInputs);
+    }
+
     // email(lowercased) -> { email, field, authority }. Highest authority wins.
-    //   5 = chip read from its field's aria-labeled container (survives collapse)
-    //   4 = chip aligned to recipient row by vertical position
-    //   3 = chip preceded by a specific recipient input in DOM order
-    //   2 = value of a named/aria recipient input
-    //   0 = last-resort default To
     const byEmail = new Map();
     const record = (email, field, authority) => {
       if (!email) return;
@@ -396,22 +443,11 @@
     const fieldRows = collectRecipientFieldRows(container);
     const selector = anyRecipientInputSelector();
 
-    // Method 0 (most reliable): chips read from their own field container.
-    // Survives the send-click collapse that zeroes the inputs/geometry.
     collectRecipientsByFieldContainer(container).forEach((r) => record(r.email, r.field, 5));
 
-    // Method 1: hidden recipient inputs sometimes carry the full address list.
-    ["to", "cc", "bcc"].forEach((field) => {
-      container.querySelectorAll(recipientInputSelector(field)).forEach((input) => {
-        extractEmailsFromString(input.value).forEach((e) => record(e, field, 2));
-      });
-    });
-
-    // Method 2: per-chip attribution for any chip Method 0 didn't place.
-    // Broad selector so co-recipients whose address lives on data-hovercard-id
-    // (not span[email]) are still seen — that under-capture dropped Cc/Bcc.
     const chips = container.querySelectorAll(CHIP_SELECTOR);
     chips.forEach((chip) => {
+      if (!isCommittedRecipientChip(chip, container)) return;
       const email = emailFromChipEl(chip);
       if (!email) return;
       const geometric = fieldForChipByGeometry(chip, fieldRows);
@@ -427,7 +463,6 @@
       record(email, "to", 0);
     });
 
-    // Method 3: last resort if no chips were found.
     if (byEmail.size === 0) {
       container.querySelectorAll(selector).forEach((input) => {
         const field = inputFieldOf(input);
@@ -436,10 +471,9 @@
       });
     }
 
-    const rank = { to: 0, cc: 1, bcc: 2 };
-    return [...byEmail.values()]
-      .map((r) => ({ email: r.email, field: r.field }))
-      .sort((a, b) => (rank[a.field] ?? 3) - (rank[b.field] ?? 3));
+    return sortRecipients(
+      [...byEmail.values()].map((r) => ({ email: r.email, field: r.field }))
+    );
   }
 
   function getSubject(container) {

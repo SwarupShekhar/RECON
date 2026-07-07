@@ -202,28 +202,6 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def _merge_recipients_json(a: str | None, b: str | None) -> str | None:
-    combined: list[dict] = []
-    seen: set[tuple[str, str]] = set()
-    for src in (a, b):
-        if not src:
-            continue
-        try:
-            items = json.loads(src)
-        except (ValueError, TypeError):
-            continue
-        for r in items:
-            email = (r.get("email") or "").strip()
-            field = r.get("field", "to") or "to"
-            key = (email.lower(), field)
-            if email and key not in seen:
-                seen.add(key)
-                combined.append({"email": email, "field": field})
-    if not combined:
-        return a or b
-    return json.dumps(combined)
-
-
 def _dedupe_dashboard_rows(rows: list) -> list:
     """Collapse accidental double-/track rows from the same Gmail send."""
     kept: list = []
@@ -241,9 +219,10 @@ def _dedupe_dashboard_rows(rows: list) -> list:
         if key in index_by_key:
             prev_idx = index_by_key[key]
             prev_email, prev_opens, prev_verified = kept[prev_idx][0], kept[prev_idx][1], kept[prev_idx][2]
-            merged = _merge_recipients_json(prev_email.all_recipients, email.all_recipients)
-            if merged:
-                prev_email.all_recipients = merged
+            # Rows are newest-first; keep the newer capture's recipient list.
+            # Unioning with an older duplicate re-introduced autocomplete ghosts.
+            if not prev_email.all_recipients and email.all_recipients:
+                prev_email.all_recipients = email.all_recipients
             if (total_opens or 0) > (prev_opens or 0):
                 kept[prev_idx] = (prev_email, total_opens, verified_opens) + tuple(row[3:])
             continue
