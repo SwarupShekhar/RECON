@@ -17,6 +17,10 @@
   {% if total_clicks > 0 %}
     <span class="pill pill-accent">{{ total_clicks }} link click{{ "s" if total_clicks != 1 else "" }}</span>
   {% endif %}
+  {% if external_opens|length > 0 %}
+    <span class="pill pill-muted">Open quality: {{ open_quality_label }}</span>
+    <span class="pill pill-muted">{{ human_likely_opens }} human-likely / {{ proxy_or_preload_opens }} proxy-preload</span>
+  {% endif %}
   {% if opens|length > external_opens|length %}
     <span class="pill pill-muted">{{ opens|length - external_opens|length }} self-open{{ "s" if (opens|length - external_opens|length) != 1 else "" }} excluded</span>
   {% endif %}
@@ -36,6 +40,7 @@
           {% endfor %}
         {% endfor %}
       </div>
+      <p style="margin-top:8px;"><span class="badge badge-muted">{{ recipient_capture_badge }}</span></p>
       <p class="text-muted" style="margin-top:10px;font-size:0.75rem;">
         One open per send — Gmail uses the same pixel for all recipients on this email.
       </p>
@@ -114,5 +119,32 @@
 </table>
 {% else %}
 <div class="empty-state">No links tracked in this email.</div>
+{% endif %}
+
+<h2>Per-Recipient Timeline</h2>
+{% if timeline %}
+<table>
+  <thead>
+    <tr><th>Time</th><th>Event</th><th>Quality</th><th>Context</th></tr>
+  </thead>
+  <tbody>
+    {% for t in timeline %}
+    <tr>
+      <td>{{ t.ts.strftime("%b %d, %H:%M:%S") if t.ts else "—" }}</td>
+      <td>
+        {% if t.kind == "open" %}
+          <span class="badge badge-muted">Open</span> {{ t.label }}
+        {% else %}
+          <span class="badge badge-accent">Click</span> {{ t.label }}
+        {% endif %}
+      </td>
+      <td class="text-muted">{{ t.quality }}</td>
+      <td class="text-muted" style="max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ t.meta }}">{{ t.meta }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty-state">No open/click timeline yet.</div>
 {% endif %}
 {% endblock %}

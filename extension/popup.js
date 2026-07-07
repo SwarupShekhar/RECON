@@ -3,6 +3,8 @@ const apiKeyEl = document.getElementById("apiKey");
 const senderEmailEl = document.getElementById("senderEmail");
 const alertsEnabledEl = document.getElementById("alertsEnabled");
 const saveBtn = document.getElementById("save");
+const importBundleBtn = document.getElementById("importBundle");
+const configBundleEl = document.getElementById("configBundle");
 const statusEl = document.getElementById("status");
 const loggedInAsEl = document.getElementById("loggedInAs");
 const loggedInEmailEl = document.getElementById("loggedInEmail");
@@ -20,6 +22,15 @@ chrome.storage.sync.get(["serverUrl", "apiKey", "senderEmail", "alertsEnabled"],
   alertsEnabledEl.checked = data.alertsEnabled !== false;
   updateDashboardLink(serverUrl);
   refreshAuthState(serverUrl, data.apiKey, data.senderEmail);
+  if (!data.apiKey) {
+    chrome.storage.local.get(["reconBackupApiKey"], (localData) => {
+      if (localData.reconBackupApiKey) {
+        apiKeyEl.value = localData.reconBackupApiKey;
+        statusEl.textContent = "Restored API key backup — click Save";
+        statusEl.className = "status";
+      }
+    });
+  }
 });
 
 function updateDashboardLink(serverUrl) {
@@ -82,6 +93,7 @@ saveBtn.addEventListener("click", () => {
   const persist = (resolvedEmail) => {
     const emailToStore = resolvedEmail || senderEmail;
     chrome.storage.sync.set({ serverUrl, apiKey, senderEmail: emailToStore, alertsEnabled }, () => {
+      chrome.storage.local.set({ reconBackupApiKey: apiKey });
       statusEl.textContent = "Saved";
       statusEl.className = "status";
       updateDashboardLink(serverUrl);
@@ -104,6 +116,29 @@ saveBtn.addEventListener("click", () => {
     );
   } else {
     persist(senderEmail);
+  }
+});
+
+importBundleBtn.addEventListener("click", () => {
+  const raw = (configBundleEl.value || "").trim();
+  if (!raw) {
+    statusEl.textContent = "Paste config bundle first";
+    statusEl.className = "error";
+    return;
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed.apiKey) {
+      throw new Error("Missing apiKey");
+    }
+    if (parsed.serverUrl) serverUrlEl.value = String(parsed.serverUrl).replace(/\/+$/, "");
+    apiKeyEl.value = String(parsed.apiKey).trim();
+    if (parsed.senderEmail) senderEmailEl.value = String(parsed.senderEmail).trim();
+    statusEl.textContent = "Bundle imported — click Save";
+    statusEl.className = "status";
+  } catch (err) {
+    statusEl.textContent = "Invalid bundle";
+    statusEl.className = "error";
   }
 });
 

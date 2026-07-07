@@ -6,6 +6,9 @@
   <h1>Tracked Emails</h1>
   <div class="flex">
     <span class="page-subtitle">Recent sends &middot; opens &middot; follow-ups</span>
+    <a href="/dashboard/reports.csv?days=7" class="btn btn-secondary" style="padding:4px 12px;font-size:0.75rem;text-decoration:none;">Export CSV (7d)</a>
+    <button type="button" id="dashboard-compact-toggle" class="btn btn-secondary" style="padding:4px 12px;font-size:0.75rem;">Compact: Off</button>
+    <button type="button" id="dashboard-auto-toggle" class="btn btn-secondary" style="padding:4px 12px;font-size:0.75rem;">Auto: On</button>
     <button type="button" id="dashboard-refresh" class="btn btn-secondary" style="padding:4px 12px;font-size:0.75rem;">Refresh</button>
   </div>
 </div>
@@ -18,10 +21,17 @@
   <div class="stats-bar" id="dashboard-stats">
     <span><strong data-stat="total">{{ stats.total }}</strong> tracked</span>
     <span><strong data-stat="opened">{{ stats.opened }}</strong> read</span>
+    <span><strong data-stat="human_likely_opened">{{ stats.human_likely_opened }}</strong> human-likely</span>
+    <span><strong data-stat="proxy_or_preload_only">{{ stats.proxy_or_preload_only }}</strong> proxy/preload-only</span>
     <span data-stat-wrap="followup"{% if stats.needs_followup == 0 %} class="is-hidden"{% endif %}>
       <span class="stat-followup"><strong data-stat="needs_followup">{{ stats.needs_followup }}</strong> need follow-up</span>
     </span>
     <span><strong data-stat="clicked">{{ stats.clicked }}</strong> clicked</span>
+  </div>
+
+  <div class="mb-16" style="display:flex;gap:10px;align-items:center;">
+    <input id="dashboard-search" type="text" placeholder="Search subject, recipient, To/Cc/Bcc..." style="max-width:420px;">
+    <span class="text-muted" style="font-size:0.75rem;">Tip: type "cc", "clicked", or an email</span>
   </div>
 
   <div id="dashboard-filters">
@@ -31,6 +41,8 @@
       <button type="button" class="filter-tab" data-filter="unopened">Unread</button>
       <button type="button" class="filter-tab" data-filter="clicked">Clicked</button>
       <button type="button" class="filter-tab" data-filter="followup">Needs follow-up</button>
+      <button type="button" class="filter-tab" data-filter="human">Human likely</button>
+      <button type="button" class="filter-tab" data-filter="proxy">Proxy/preload</button>
     </div>
 
     <table>
@@ -48,9 +60,15 @@
         {% for e in emails %}
         <tr class="row-clickable{% if e.needs_followup %} row-followup{% endif %}"
             data-filter="{{ e.filter_tags }}"
+            data-search="{{ e.search_blob }}"
             onclick="window.location='/dashboard/email/{{ e.id }}'">
           <td style="font-weight:600;max-width:28ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
             {{ e.subject or "(no subject)" }}
+            {% if e.is_latest %}
+            <div style="margin-top:4px;">
+              <span class="badge badge-muted" style="font-size:0.625rem;">{{ e.recipient_capture_badge }}</span>
+            </div>
+            {% endif %}
           </td>
           <td>
             <div class="recip-chips" aria-label="Email recipients">
@@ -70,6 +88,7 @@
           <td class="text-muted">
             {% if e.total_opens > 0 %}
               {{ e.total_opens }}{% if e.last_opened %} &middot; {{ e.last_opened|time_ago }}{% endif %}
+            <div class="text-muted" style="font-size:0.7rem;margin-top:2px;">{{ e.open_quality_label }}</div>
             {% else %}—{% endif %}
           </td>
           <td class="text-muted">
@@ -92,6 +111,14 @@
               {% endif %}
               {% if e.link_clicks > 0 %}
                 <span class="badge badge-accent" style="margin-left:6px;">Clicked</span>
+              {% endif %}
+              {% if e.needs_followup and e.followup_draft %}
+                <button
+                  type="button"
+                  class="btn btn-secondary recon-followup-btn"
+                  style="margin-left:8px;padding:2px 8px;font-size:0.65rem;"
+                  onclick='event.stopPropagation(); reconCopyFollowupDraftText({{ e.followup_draft|tojson }}, this);'
+                >Copy follow-up</button>
               {% endif %}
             </span>
           </td>
@@ -143,17 +170,24 @@
     if (row.has_clicks) {
       html += '<span class="badge badge-accent" style="margin-left:6px;">Clicked</span>';
     }
+    if (row.needs_followup && row.followup_draft) {
+      html += '<button type="button" class="btn btn-secondary recon-followup-btn" style="margin-left:8px;padding:2px 8px;font-size:0.65rem;" onclick="event.stopPropagation(); reconCopyFollowupDraftText(' + JSON.stringify(row.followup_draft || "") + ', this);">Copy follow-up</button>';
+    }
     html += "</span>";
     return html;
   }
 
   function reconRenderDashboardRow(row) {
     var followupClass = row.needs_followup ? " row-followup" : "";
-    return '<tr class="row-clickable' + followupClass + '" data-filter="' + row.filter_tags + '" onclick="window.location=\'/dashboard/email/' + row.id + '\'">' +
-      '<td style="font-weight:600;max-width:28ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + reconEsc(row.subject) + '</td>' +
+    var capture = row.is_latest && row.recipient_capture_badge
+      ? '<div style="margin-top:4px;"><span class="badge badge-muted" style="font-size:0.625rem;">' + reconEsc(row.recipient_capture_badge) + '</span></div>'
+      : "";
+    var quality = row.opens !== "—" ? '<div class="text-muted" style="font-size:0.7rem;margin-top:2px;">' + reconEsc(row.open_quality_label || "—") + '</div>' : "";
+    return '<tr class="row-clickable' + followupClass + '" data-filter="' + row.filter_tags + '" data-search="' + reconEsc(row.search_blob || "") + '" onclick="window.location=\'/dashboard/email/' + row.id + '\'">' +
+      '<td style="font-weight:600;max-width:28ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + reconEsc(row.subject) + capture + '</td>' +
       '<td><div class="recip-chips" aria-label="Email recipients">' + reconRenderRecipients(row.recipients) + '</div></td>' +
       '<td class="text-muted" title="' + (row.sent_title || "") + '">' + row.sent_ago + '</td>' +
-      '<td class="text-muted">' + row.opens + '</td>' +
+      '<td class="text-muted">' + row.opens + quality + '</td>' +
       '<td class="text-muted">' + row.clicks + '</td>' +
       '<td>' + reconRenderStatusCell(row) + '</td></tr>';
   }
@@ -161,7 +195,7 @@
   function reconUpdateDashboardStats(stats) {
     var bar = document.getElementById("dashboard-stats");
     if (!bar) return;
-    ["total", "opened", "needs_followup", "clicked"].forEach(function (key) {
+    ["total", "opened", "needs_followup", "clicked", "human_likely_opened", "proxy_or_preload_only"].forEach(function (key) {
       var el = bar.querySelector('[data-stat="' + key + '"]');
       if (el) el.textContent = stats[key] || 0;
     });
@@ -184,21 +218,48 @@
     if (!container) return;
     var activeTab = container.querySelector(".filter-tab.active");
     var filter = activeTab ? activeTab.getAttribute("data-filter") : "all";
+    var search = (document.getElementById("dashboard-search")?.value || "").trim().toLowerCase();
     var rows = container.querySelectorAll("tbody tr[data-filter]");
     rows.forEach(function (row) {
       var tags = (row.getAttribute("data-filter") || "").split(/\s+/).filter(Boolean);
-      var show = filter === "all" || tags.indexOf(filter) !== -1;
+      var searchBlob = (row.getAttribute("data-search") || "").toLowerCase();
+      var filterMatch = filter === "all" || tags.indexOf(filter) !== -1;
+      var searchMatch = !search || searchBlob.indexOf(search) !== -1;
+      var show = filterMatch && searchMatch;
       row.classList.toggle("is-hidden", !show);
     });
     reconSyncFilterEmptyState();
   }
 
-  function reconRefreshDashboard() {
+  function reconCopyFollowupDraftText(draft, btn) {
+    if (!draft) return;
+    navigator.clipboard.writeText(draft).then(function () {
+      var orig = btn.textContent;
+      btn.textContent = "Copied";
+      setTimeout(function () { btn.textContent = orig; }, 1200);
+    });
+  }
+
+  var reconAutoRefreshEnabled = true;
+  var reconAutoTimer = null;
+  function reconSetAutoRefresh(on) {
+    reconAutoRefreshEnabled = !!on;
+    var btn = document.getElementById("dashboard-auto-toggle");
+    if (btn) btn.textContent = "Auto: " + (reconAutoRefreshEnabled ? "On" : "Off");
+    if (reconAutoTimer) clearInterval(reconAutoTimer);
+    if (reconAutoRefreshEnabled) {
+      reconAutoTimer = setInterval(function () {
+        if (!document.hidden) reconRefreshDashboard(true);
+      }, 25000);
+    }
+  }
+
+  function reconRefreshDashboard(silent) {
     var btn = document.getElementById("dashboard-refresh");
     if (!btn || btn.disabled) return;
     var orig = btn.textContent;
     btn.disabled = true;
-    btn.textContent = "Refreshing…";
+    if (!silent) btn.textContent = "Refreshing…";
     fetch("/dashboard/data", { credentials: "same-origin", headers: { Accept: "application/json" } })
       .then(function (res) {
         if (!res.ok) throw new Error("refresh failed");
@@ -218,16 +279,22 @@
         reconUpdateDashboardStats(data.stats || {});
         if (tbody) {
           tbody.innerHTML = data.emails.map(reconRenderDashboardRow).join("");
+          data.emails.forEach(function (row, idx) {
+            var tr = tbody.children[idx];
+            if (tr && row.search_blob) tr.setAttribute("data-search", row.search_blob);
+          });
         }
         reconRebindDashboardFilters();
       })
       .catch(function () {
-        btn.textContent = "Failed";
-        setTimeout(function () { btn.textContent = orig; }, 1500);
+        if (!silent) {
+          btn.textContent = "Failed";
+          setTimeout(function () { btn.textContent = orig; }, 1500);
+        }
       })
       .finally(function () {
         btn.disabled = false;
-        if (btn.textContent === "Refreshing…") btn.textContent = orig;
+        if (!silent && btn.textContent === "Refreshing…") btn.textContent = orig;
       });
   }
 
@@ -236,11 +303,39 @@
     var container = document.getElementById("dashboard-filters");
     if (!container) return;
     container.querySelectorAll(".filter-tab").forEach(function (tab) {
-      tab.addEventListener("click", reconSyncFilterEmptyState);
+      tab.addEventListener("click", reconRebindDashboardFilters);
     });
-    reconSyncFilterEmptyState();
+    var searchEl = document.getElementById("dashboard-search");
+    if (searchEl) searchEl.addEventListener("input", reconRebindDashboardFilters);
+    reconRebindDashboardFilters();
   })();
+
+  var compactBtn = document.getElementById("dashboard-compact-toggle");
+  var compactOn = localStorage.getItem("reconCompactMode") === "1";
+  function applyCompact() {
+    document.body.classList.toggle("recon-compact", compactOn);
+    if (compactBtn) compactBtn.textContent = "Compact: " + (compactOn ? "On" : "Off");
+    localStorage.setItem("reconCompactMode", compactOn ? "1" : "0");
+  }
+  if (compactBtn) {
+    compactBtn.addEventListener("click", function () {
+      compactOn = !compactOn;
+      applyCompact();
+    });
+  }
+  applyCompact();
+
+  var autoBtn = document.getElementById("dashboard-auto-toggle");
+  if (autoBtn) autoBtn.addEventListener("click", function () { reconSetAutoRefresh(!reconAutoRefreshEnabled); });
+  reconSetAutoRefresh(true);
+
   var refreshBtn = document.getElementById("dashboard-refresh");
   if (refreshBtn) refreshBtn.addEventListener("click", reconRefreshDashboard);
 </script>
+
+<style>
+  body.recon-compact th, body.recon-compact td { padding: 6px 10px; font-size: 0.75rem; }
+  body.recon-compact .recip-chip { padding: 1px 6px; }
+  body.recon-compact .status-cell { gap: 1px; }
+</style>
 {% endblock %}

@@ -26,6 +26,7 @@ from .reports import build_report
 from .routes import links, mute, pixel, reports, status, track
 
 scheduler = AsyncIOScheduler()
+_last_digest_snapshot: dict[str, dict[str, int]] = {}
 
 
 async def _send_periodic_report(period_label: str, days: int) -> None:
@@ -52,6 +53,18 @@ async def _send_periodic_report(period_label: str, days: int) -> None:
             if not rows:
                 continue
             r = rows[0]
+            digest_key = f"{period_label}:{sender_email}"
+            current = {
+                "emails_sent": r["emails_sent"],
+                "opens": r["opens"],
+                "verified_opens": r["verified_opens"],
+                "link_clicks": r["link_clicks"],
+            }
+            prev = _last_digest_snapshot.get(digest_key)
+            if prev == current:
+                continue
+            _last_digest_snapshot[digest_key] = current
+
             message = (
                 f"\U0001f4ca {period_label} report for {sender_email}: "
                 f"{r['emails_sent']} sent, {r['opens']} opens "

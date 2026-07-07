@@ -1,3 +1,4 @@
+import csv
 import hashlib
 import io
 import json
@@ -68,6 +69,13 @@ templates.env.globals["clerk_js_url"] = os.environ.get(
 )
 
 FOLLOWUP_AFTER_DAYS = 2
+PROXY_UA_FRAGMENTS = (
+    "GoogleImageProxy",
+    "CloudImageProxy",
+    "Barracuda",
+    "Proofpoint",
+    "Mimecast",
+)
 
 
 def _time_ago(dt: datetime | None) -> str:
@@ -94,6 +102,54 @@ def _needs_followup(created_at: datetime | None, total_opens: int) -> bool:
         created_at = created_at.replace(tzinfo=timezone.utc)
     cutoff = datetime.now(timezone.utc) - timedelta(days=FOLLOWUP_AFTER_DAYS)
     return created_at < cutoff
+
+
+def _is_proxy_user_agent(user_agent: str | None) -> bool:
+    if not user_agent:
+        return False
+    return any(frag in user_agent for frag in PROXY_UA_FRAGMENTS)
+
+
+def _open_quality_label(human_likely_opens: int, proxy_or_preload_opens: int) -> str:
+    if human_likely_opens > 0 and proxy_or_preload_opens > 0:
+        return "Mixed"
+    if human_likely_opens > 0:
+        return "Human likely"
+    if proxy_or_preload_opens > 0:
+        return "Proxy/preload"
+    return "—"
+
+
+def _recipient_capture_badge(all_recipients_json: str | None, grouped_recipients: list[tuple[str, list[str]]]) -> str:
+    fields = [field.upper() for field, addrs in grouped_recipients if addrs]
+    if not fields:
+        return "Captured: To"
+    uniq = []
+    for f in fields:
+        if f not in uniq:
+            uniq.append(f)
+    prefix = "Captured"
+    if not all_recipients_json:
+        prefix = "Captured (fallback)"
+    return f"{prefix}: {'/'.join(uniq)}"
+
+
+def _followup_draft(email: dict) -> str:
+    if not email.get("needs_followup"):
+        return ""
+    to_addrs = [r["email"] for r in email.get("recipients_flat", []) if r.get("field") == "to"]
+    cc_addrs = [r["email"] for r in email.get("recipients_flat", []) if r.get("field") == "cc"]
+    greet = "Hi there,"
+    if to_addrs:
+        greet = f"Hi {to_addrs[0].split('@')[0]},"
+    subject = email.get("subject") or "(no subject)"
+    cc_line = f"\n(Cc: {', '.join(cc_addrs)})" if cc_addrs else ""
+    return (
+        f"{greet}\n\n"
+        f"Quick follow-up on \"{subject}\" — sharing this again in case it got buried.{cc_line}\n\n"
+        "Happy to help if you have any questions.\n\n"
+        "Best,\n"
+    )
 
 
 templates.env.filters["time_ago"] = _time_ago
@@ -252,14 +308,45 @@ async def _load_dashboard_data(user: User, db: AsyncSession) -> tuple[list[dict]
         .limit(200)
     )
     rows = _dedupe_dashboard_rows(result.all())
+    email_ids = [row[0].id for row in rows]
+
+    open_quality_counts: dict[str, dict[str, int]] = {}
+    if email_ids:
+        opens_result = await db.execute(
+            select(Open.email_id, Open.verified, Open.user_agent)
+            .where(Open.email_id.in_(email_ids), Open.internal == False)
+        )
+        for email_id, verified, user_agent in opens_result.all():
+            bucket = open_quality_counts.setdefault(
+                email_id, {"human_likely_opens": 0, "proxy_or_preload_opens": 0}
+            )
+            if verified and not _is_proxy_user_agent(user_agent):
+                bucket["human_likely_opens"] += 1
+            else:
+                bucket["proxy_or_preload_opens"] += 1
 
     emails: list[dict] = []
-    stats = {"total": 0, "opened": 0, "needs_followup": 0, "clicked": 0}
+    stats = {
+        "total": 0,
+        "opened": 0,
+        "needs_followup": 0,
+        "clicked": 0,
+        "human_likely_opened": 0,
+        "proxy_or_preload_only": 0,
+    }
     for email, total_opens, verified_opens, last_opened, link_clicks in rows:
         total_opens = total_opens or 0
         verified_opens = verified_opens or 0
         link_clicks = link_clicks or 0
         followup = _needs_followup(email.created_at, total_opens)
+        quality = open_quality_counts.get(
+            email.id, {"human_likely_opens": 0, "proxy_or_preload_opens": 0}
+        )
+        grouped_recipients = _grouped_recipients(email.all_recipients, email.recipient_email)
+        recipients_flat = []
+        for field, addrs in grouped_recipients:
+            for addr in addrs:
+                recipients_flat.append({"field": field, "email": addr})
         filter_tags = []
         if followup:
             filter_tags.append("followup")
@@ -269,17 +356,31 @@ async def _load_dashboard_data(user: User, db: AsyncSession) -> tuple[list[dict]
             filter_tags.append("unopened")
         if link_clicks > 0:
             filter_tags.append("clicked")
+        if quality["human_likely_opens"] > 0:
+            filter_tags.append("human")
+        if quality["proxy_or_preload_opens"] > 0:
+            filter_tags.append("proxy")
         if verified_opens > 0 or (total_opens > 0 and verified_opens == 0):
             stats["opened"] += 1
         if followup:
             stats["needs_followup"] += 1
         if link_clicks > 0:
             stats["clicked"] += 1
+        if quality["human_likely_opens"] > 0:
+            stats["human_likely_opened"] += 1
+        elif quality["proxy_or_preload_opens"] > 0:
+            stats["proxy_or_preload_only"] += 1
+        search_blob = " ".join(
+            [email.subject or "", email.recipient_email or ""]
+            + [r["email"] for r in recipients_flat]
+            + [r["field"] for r in recipients_flat]
+        ).lower()
         emails.append({
             "id": email.id,
             "subject": email.subject,
             "recipient_email": email.recipient_email,
-            "recipients": _grouped_recipients(email.all_recipients, email.recipient_email),
+            "recipients": grouped_recipients,
+            "recipients_flat": recipients_flat,
             "created_at": email.created_at,
             "total_opens": total_opens,
             "verified_opens": verified_opens,
@@ -287,8 +388,19 @@ async def _load_dashboard_data(user: User, db: AsyncSession) -> tuple[list[dict]
             "link_clicks": link_clicks,
             "needs_followup": followup,
             "filter_tags": " ".join(filter_tags),
+            "human_likely_opens": quality["human_likely_opens"],
+            "proxy_or_preload_opens": quality["proxy_or_preload_opens"],
+            "open_quality_label": _open_quality_label(
+                quality["human_likely_opens"], quality["proxy_or_preload_opens"]
+            ),
+            "recipient_capture_badge": _recipient_capture_badge(email.all_recipients, grouped_recipients),
+            "search_blob": search_blob,
         })
         stats["total"] += 1
+
+    for idx, email in enumerate(emails):
+        email["is_latest"] = idx == 0
+        email["followup_draft"] = _followup_draft(email)
 
     return emails, stats
 
@@ -328,6 +440,13 @@ def _serialize_dashboard_row(e: dict) -> dict:
         "has_clicks": e["link_clicks"] > 0,
         "needs_followup": e["needs_followup"],
         "filter_tags": e["filter_tags"],
+        "human_likely_opens": e["human_likely_opens"],
+        "proxy_or_preload_opens": e["proxy_or_preload_opens"],
+        "open_quality_label": e["open_quality_label"],
+        "recipient_capture_badge": e["recipient_capture_badge"],
+        "is_latest": e.get("is_latest", False),
+        "followup_draft": e.get("followup_draft", ""),
+        "search_blob": e.get("search_blob", ""),
     }
 
 
@@ -402,6 +521,10 @@ async def email_detail_page(
     opens = opens_result.scalars().all()
     external_opens = [o for o in opens if not o.internal]
     verified_opens = sum(1 for o in external_opens if o.verified)
+    human_likely_opens = sum(
+        1 for o in external_opens if o.verified and not _is_proxy_user_agent(o.user_agent)
+    )
+    proxy_or_preload_opens = len(external_opens) - human_likely_opens
 
     links_result = await db.execute(
         select(
@@ -429,18 +552,94 @@ async def email_detail_page(
         })
 
     total_clicks = sum(l["click_count"] for l in links)
+    recipients = _grouped_recipients(email.all_recipients, email.recipient_email)
+
+    timeline = []
+    for o in opens:
+        if o.internal:
+            quality = "Self (excluded)"
+        elif o.verified and not _is_proxy_user_agent(o.user_agent):
+            quality = "Human likely"
+        else:
+            quality = "Proxy/preload"
+        timeline.append({
+            "ts": o.opened_at,
+            "kind": "open",
+            "quality": quality,
+            "label": "Email opened",
+            "meta": o.ip or "No IP",
+        })
+    for link in links:
+        for c in link["clicks"]:
+            timeline.append({
+                "ts": c.clicked_at,
+                "kind": "click",
+                "quality": "Human likely" if c.verified else "Unverified",
+                "label": f"Link click ({link['link_type']})",
+                "meta": link["original_url"],
+            })
+    timeline.sort(key=lambda item: item["ts"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
 
     return templates.TemplateResponse("email_detail.html", {
         "request": request,
         "user": user,
         "email": email,
-        "recipients": _grouped_recipients(email.all_recipients, email.recipient_email),
+        "recipients": recipients,
         "opens": opens,
         "external_opens": external_opens,
         "verified_opens": verified_opens,
+        "human_likely_opens": human_likely_opens,
+        "proxy_or_preload_opens": proxy_or_preload_opens,
+        "open_quality_label": _open_quality_label(human_likely_opens, proxy_or_preload_opens),
         "links": links,
         "total_clicks": total_clicks,
+        "timeline": timeline,
+        "recipient_capture_badge": _recipient_capture_badge(email.all_recipients, recipients),
     })
+
+
+@router.get("/dashboard/reports.csv")
+async def reports_csv(
+    days: int = 7,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    days = min(max(days, 1), 90)
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    report = await build_report(db, user.email, since)
+    rows = report.get("senders", [])
+
+    stream = io.StringIO()
+    writer = csv.writer(stream)
+    writer.writerow([
+        "sender_email",
+        "emails_sent",
+        "emails_opened",
+        "opens",
+        "verified_opens",
+        "unique_recipients_opened",
+        "link_clicks",
+        "since_utc",
+    ])
+    since_label = since.strftime("%Y-%m-%d %H:%M:%S")
+    for row in rows:
+        writer.writerow([
+            row["sender_email"],
+            row["emails_sent"],
+            row["emails_opened"],
+            row["opens"],
+            row["verified_opens"],
+            row["unique_recipients_opened"],
+            row["link_clicks"],
+            since_label,
+        ])
+
+    filename = f"recon-weekly-{datetime.now(timezone.utc).strftime('%Y%m%d')}.csv"
+    return StreamingResponse(
+        iter([stream.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/dashboard/reports", response_class=HTMLResponse)

@@ -192,9 +192,9 @@
       });
     });
 
-    // Method 2: labeled recipient rows / their chips, keyed to whichever
-    // field the closest textbox's aria-label identifies. Covers the case
-    // where the hidden inputs aren't populated yet at send time.
+    // Method 2: scan the compose subtree in DOM order and track the active
+    // recipient field (To/Cc/Bcc) based on aria-label markers. Gmail's chip
+    // structure is unstable, but these labels are consistently present.
     const fieldFromLabel = (label) => {
       const l = (label || "").trim().toLowerCase();
       if (l.startsWith("cc") || l.includes("cc recipients")) return "cc";
@@ -203,38 +203,27 @@
       return null;
     };
 
-    const addChipsScopedTo = (input, field) => {
-      if (!input) return;
-      const parent = input.closest('div[role="list"]') || input.parentElement;
-      if (!parent) return;
-      parent.querySelectorAll("span[email]").forEach((chip) => {
-        addChip(chip.getAttribute("email"), field);
-      });
-    };
+    let currentField = "to";
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_ELEMENT);
+    let node = walker.currentNode;
+    while (node) {
+      const aria = node.getAttribute?.("aria-label") || "";
+      const inferred = fieldFromLabel(aria);
+      if (inferred) currentField = inferred;
 
-    addChipsScopedTo(
-      container.querySelector('input[aria-label="To recipients"]') ||
-        container.querySelector('input[name="to"]'),
-      "to"
-    );
-    addChipsScopedTo(
-      container.querySelector('input[aria-label="Cc recipients"]') ||
-        container.querySelector('input[name="cc"]'),
-      "cc"
-    );
-    addChipsScopedTo(
-      container.querySelector('input[aria-label="Bcc recipients"]') ||
-        container.querySelector('input[name="bcc"]'),
-      "bcc"
-    );
+      if (node.tagName === "INPUT" && aria) {
+        const inputField = fieldFromLabel(aria);
+        if (inputField) {
+          extractEmailsFromString(node.value).forEach((e) => addChip(e, inputField));
+        }
+      }
 
-    container.querySelectorAll("[aria-label]").forEach((el) => {
-      const field = fieldFromLabel(el.getAttribute("aria-label"));
-      if (!field) return;
-      el.querySelectorAll("span[email]").forEach((chip) => {
-        addChip(chip.getAttribute("email"), field);
-      });
-    });
+      if (node.tagName === "SPAN" && node.hasAttribute("email")) {
+        addChip(node.getAttribute("email"), currentField);
+      }
+
+      node = walker.nextNode();
+    }
 
     // Method 3: last resort — every chip we can find, attributed to To.
     if (results.length === 0) {

@@ -44,12 +44,12 @@
 
   <li class="setup-step">
     <div class="setup-step-title">Configure the extension popup</div>
-    <p class="text-muted">Click the Recon icon in Chrome. The <strong>API Server URL is already filled in</strong> — you only need to paste your API key from step 3.</p>
+    <p class="text-muted">Click the Recon icon in Chrome. The <strong>API Server URL is already filled in</strong> — you can either paste API key directly or use Import Bundle from step 3.</p>
     <div class="setup-copy-block">
       <div><span class="text-muted">API Server URL</span> <span class="badge badge-accent">pre-filled</span><br><code>{{ base_url }}</code></div>
       <div style="margin-top:10px;"><span class="text-muted">API Key</span><br><code>paste from Extension Key page</code></div>
     </div>
-    <p class="text-muted" style="margin-top:10px;">Click <strong>Save</strong>. You should see “Logged in as {{ user.email }}”.</p>
+    <p class="text-muted" style="margin-top:10px;">Click <strong>Save</strong>. You should see “Logged in as {{ user.email }}”. Saved keys are backed up in extension storage for upgrades.</p>
   </li>
 
   <li class="setup-step">
