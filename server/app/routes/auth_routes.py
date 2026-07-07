@@ -69,8 +69,15 @@ templates.env.globals["clerk_js_url"] = os.environ.get(
 )
 
 FOLLOWUP_AFTER_DAYS = 2
+# UAs that are NOT a human viewing the message. Deliberately excludes
+# GoogleImageProxy: Gmail routes EVERY image load through it — the delivery
+# prefetch AND the genuine open look identical by UA. Timing separates those
+# (the send-grace window / extension mute flags the prefetch as internal), so
+# a GoogleImageProxy hit that survives to here is a real Gmail open, not a
+# preload. What remains are true non-human fetchers:
+#   CloudImageProxy         — Apple Mail Privacy, preloads regardless of open
+#   Barracuda/Proofpoint/…  — corporate security scanners
 PROXY_UA_FRAGMENTS = (
-    "GoogleImageProxy",
     "CloudImageProxy",
     "Barracuda",
     "Proofpoint",
