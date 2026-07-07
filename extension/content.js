@@ -596,7 +596,13 @@
     }
 
     debugDumpRecipients(container);
-    const recipients = getRecipientEmails(container);
+    let recipients = getRecipientEmails(container);
+    if (recipients.length === 0 && container._reconRecipientSnapshot) {
+      // Gmail collapsed the recipient editor between mousedown and click —
+      // fall back to the snapshot taken on mousedown (while it was expanded).
+      recipients = container._reconRecipientSnapshot;
+      console.log("[Recon] Using recipient snapshot from mousedown");
+    }
     if (recipients.length === 0) {
       console.warn("[Recon] No recipients found");
       return;
@@ -651,6 +657,8 @@
 
     registerTracker(trackerId, primary.email, subject, threadId, primary.field, linksForThisCall, allRecipients)
       .catch((err) => console.error("[Recon] Tracker registration failed:", err));
+
+    container._reconRecipientSnapshot = null;
   }
 
   function isScheduleSendConfirmButton(el) {
@@ -713,6 +721,21 @@
     return btn.parentElement?.parentElement?.parentElement || null;
   }
 
+  // Gmail collapses the recipient editor the instant Send is clicked, which
+  // can zero out inputs/chips before the click handler reads them. mousedown
+  // fires first, while the editor is still expanded — snapshot recipients then
+  // (using the same getRecipientEmails) so handleSend always has a real list.
+  function snapshotRecipients(container) {
+    try {
+      const recipients = getRecipientEmails(container);
+      if (recipients.length > 0) {
+        container._reconRecipientSnapshot = recipients;
+      }
+    } catch (err) {
+      console.warn("[Recon] recipient snapshot failed:", err);
+    }
+  }
+
   function bindSendButton(btn) {
     if (btn._reconBound) return;
     const container = findComposeContainer(btn);
@@ -721,6 +744,9 @@
 
     btn._reconBound = true;
     container._reconSendButtonBound = true;
+    btn.addEventListener("mousedown", () => {
+      snapshotRecipients(container);
+    }, true);
     btn.addEventListener("click", () => {
       console.log("[Recon] Send clicked, container found");
       handleSend(container);
