@@ -130,10 +130,10 @@
     return matches || [];
   }
 
-  // One-shot DOM reconnaissance: Gmail's compose recipient markup is
-  // undocumented and we can't inspect it remotely. This logs exactly where
-  // To/Cc/Bcc live so the selectors can be made precise from a real send.
+  // Opt-in only: set window.__RECON_DEBUG_RECIPIENTS = true in the Gmail
+  // console, then send once to capture compose DOM for To/Cc/Bcc parsing.
   function debugDumpRecipients(container) {
+    if (!window.__RECON_DEBUG_RECIPIENTS) return;
     try {
       const info = { inputs: {}, ariaLabels: [], chips: [] };
       ["to", "cc", "bcc"].forEach((f) => {
@@ -167,72 +167,136 @@
     }
   }
 
-  function getRecipientEmails(container) {
-    const results = [];
-    const seen = new Set();
+  function recipientInputSelector(field) {
+    const labels = {
+      to: ["To recipients", "to recipients"],
+      cc: ["CC recipients", "Cc recipients", "cc recipients"],
+      bcc: ["BCC recipients", "Bcc recipients", "bcc recipients"],
+    };
+    const names = labels[field] || [];
+    const parts = [`input[name="${field}"]`];
+    names.forEach((label) => {
+      parts.push(`input[aria-label="${label}"]`);
+    });
+    return parts.join(", ");
+  }
 
-    const addChip = (email, field) => {
+  function fieldFromRecipientLabel(label) {
+    const l = (label || "").trim().toLowerCase();
+    if (l === "to recipients" || l === "to") return "to";
+    if (l === "cc recipients" || l === "cc") return "cc";
+    if (l === "bcc recipients" || l === "bcc") return "bcc";
+    return null;
+  }
+
+  // Classify a recipient <input> element to its field via name or aria-label.
+  function inputFieldOf(input) {
+    const name = input.getAttribute("name");
+    if (name === "to" || name === "cc" || name === "bcc") return name;
+    return fieldFromRecipientLabel(input.getAttribute("aria-label") || "");
+  }
+
+  function getRecipientEmails(container) {
+    // email(lowercased) -> { email, field, authority }. The same address can be
+    // seen by several passes with conflicting fields; the highest-authority
+    // observation wins. This is the core To/Cc/Bcc fix: attribution no longer
+    // hinges on one fragile DOM-order heuristic that collapsed everything to To.
+    //   authority 3 = chip resolved to its own field wrapper (structural)
+    //   authority 2 = value of a named/aria recipient input
+    //   authority 1 = DOM-order running field
+    //   authority 0 = last-resort, defaulted to To
+    const byEmail = new Map();
+    const record = (email, field, authority) => {
       if (!email) return;
       const norm = String(email).trim().toLowerCase();
-      if (!norm || seen.has(norm)) return;
-      seen.add(norm);
-      results.push({ email: norm, field });
+      if (!norm) return;
+      const existing = byEmail.get(norm);
+      if (!existing || authority > existing.authority) {
+        byEmail.set(norm, { email: norm, field: field || "to", authority });
+      }
     };
 
-    // Method 1 (most reliable): Gmail keeps form inputs named to/cc/bcc whose
-    // value is the actual outgoing address list. Chip DOM scraping is fragile
-    // and field grouping there is unreliable; the input values are not.
-    [
-      ["to", 'input[name="to"]'],
-      ["cc", 'input[name="cc"]'],
-      ["bcc", 'input[name="bcc"]'],
-    ].forEach(([field, sel]) => {
-      container.querySelectorAll(sel).forEach((input) => {
-        extractEmailsFromString(input.value).forEach((e) => addChip(e, field));
-      });
-    });
+    const anyRecipientInputSelector = ["to", "cc", "bcc"]
+      .map(recipientInputSelector)
+      .join(", ");
 
-    // Method 2: scan the compose subtree in DOM order and track the active
-    // recipient field (To/Cc/Bcc) based on aria-label markers. Gmail's chip
-    // structure is unstable, but these labels are consistently present.
-    const fieldFromLabel = (label) => {
-      const l = (label || "").trim().toLowerCase();
-      if (l.startsWith("cc") || l.includes("cc recipients")) return "cc";
-      if (l.startsWith("bcc") || l.includes("bcc recipients")) return "bcc";
-      if (l.startsWith("to") || l.includes("to recipients")) return "to";
+    // Climb from a chip to the nearest ancestor whose subtree contains exactly
+    // one recipient field. That field names the chip STRUCTURALLY — independent
+    // of DOM order or sibling field markers, which is what the running-field
+    // heuristic got wrong (every chip inheriting "to"). If the nearest such
+    // ancestor spans multiple fields we bail and let the weaker fallback decide.
+    const fieldFromAncestorInput = (el) => {
+      let node = el.parentElement;
+      let depth = 0;
+      while (node && node !== container && depth < 15) {
+        const inputs = node.querySelectorAll(anyRecipientInputSelector);
+        if (inputs.length > 0) {
+          const fields = new Set();
+          inputs.forEach((i) => {
+            const f = inputFieldOf(i);
+            if (f) fields.add(f);
+          });
+          if (fields.size === 1) return fields.values().next().value;
+          if (fields.size > 1) return null; // shared ancestor — too high to trust
+        }
+        node = node.parentElement;
+        depth++;
+      }
       return null;
     };
 
+    // Method 1: Gmail's recipient inputs (name="to|cc|bcc" or aria-label
+    // "To/Cc/Bcc recipients") carry the real address list — reliable WHEN
+    // populated, but Gmail fills them lazily and they can be empty at send-click
+    // capture time, so this is one input into the merge, not the sole source.
+    ["to", "cc", "bcc"].forEach((field) => {
+      container.querySelectorAll(recipientInputSelector(field)).forEach((input) => {
+        extractEmailsFromString(input.value).forEach((e) => record(e, field, 2));
+      });
+    });
+
+    // Method 2: walk the compose subtree. Each chip is resolved to its own
+    // field structurally (authority 3); the DOM-order running field
+    // (authority 1) is only used when structure is opaque.
     let currentField = "to";
     const walker = document.createTreeWalker(container, NodeFilter.SHOW_ELEMENT);
     let node = walker.currentNode;
     while (node) {
-      const aria = node.getAttribute?.("aria-label") || "";
-      const inferred = fieldFromLabel(aria);
-      if (inferred) currentField = inferred;
-
-      if (node.tagName === "INPUT" && aria) {
-        const inputField = fieldFromLabel(aria);
+      if (node.tagName === "INPUT") {
+        const inputField = fieldFromRecipientLabel(node.getAttribute("aria-label") || "");
         if (inputField) {
-          extractEmailsFromString(node.value).forEach((e) => addChip(e, inputField));
+          currentField = inputField;
+          extractEmailsFromString(node.value).forEach((e) => record(e, inputField, 2));
         }
       }
 
       if (node.tagName === "SPAN" && node.hasAttribute("email")) {
-        addChip(node.getAttribute("email"), currentField);
+        const structural = fieldFromAncestorInput(node);
+        if (structural) {
+          record(node.getAttribute("email"), structural, 3);
+        } else {
+          record(node.getAttribute("email"), currentField, 1);
+        }
       }
 
       node = walker.nextNode();
     }
 
     // Method 3: last resort — every chip we can find, attributed to To.
-    if (results.length === 0) {
+    if (byEmail.size === 0) {
       container.querySelectorAll("span[email]").forEach((chip) => {
-        addChip(chip.getAttribute("email"), "to");
+        record(chip.getAttribute("email"), "to", 0);
       });
     }
 
-    return results;
+    // Order To -> Cc -> Bcc so handleSend's primary (results[0]) is a real To
+    // when one exists. We intentionally no longer fabricate a To for a genuine
+    // Cc/Bcc-only send — the old promote-first-to-To fallback masked those and
+    // produced misleading dashboard badges.
+    const rank = { to: 0, cc: 1, bcc: 2 };
+    return [...byEmail.values()]
+      .map((r) => ({ email: r.email, field: r.field }))
+      .sort((a, b) => (rank[a.field] ?? 3) - (rank[b.field] ?? 3));
   }
 
   function getSubject(container) {
