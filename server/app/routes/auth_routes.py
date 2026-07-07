@@ -350,9 +350,12 @@ async def _load_dashboard_data(user: User, db: AsyncSession) -> tuple[list[dict]
         filter_tags = []
         if followup:
             filter_tags.append("followup")
-        if total_opens > 0:
+        # "Read" (opened) means a confirmed human-likely open. A proxy/preload-
+        # only row is neither Read nor Unread — it lives under the Proxy filter
+        # so it isn't miscounted as read OR hidden as never-touched.
+        if quality["human_likely_opens"] > 0:
             filter_tags.append("opened")
-        else:
+        elif quality["proxy_or_preload_opens"] == 0:
             filter_tags.append("unopened")
         if link_clicks > 0:
             filter_tags.append("clicked")
@@ -360,7 +363,7 @@ async def _load_dashboard_data(user: User, db: AsyncSession) -> tuple[list[dict]
             filter_tags.append("human")
         if quality["proxy_or_preload_opens"] > 0:
             filter_tags.append("proxy")
-        if verified_opens > 0 or (total_opens > 0 and verified_opens == 0):
+        if quality["human_likely_opens"] > 0:
             stats["opened"] += 1
         if followup:
             stats["needs_followup"] += 1
@@ -416,10 +419,10 @@ def _serialize_dashboard_row(e: dict) -> dict:
             opens_display += f" · {_time_ago(last_opened)}"
 
     status = "unread"
-    if e["verified_opens"] > 0:
+    if e["human_likely_opens"] > 0:
         status = "read"
-    elif e["total_opens"] > 0:
-        status = "unverified"
+    elif e["proxy_or_preload_opens"] > 0:
+        status = "preloaded"
     elif e["needs_followup"]:
         status = "followup"
 
