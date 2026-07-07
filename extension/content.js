@@ -130,6 +130,43 @@
     return matches || [];
   }
 
+  // One-shot DOM reconnaissance: Gmail's compose recipient markup is
+  // undocumented and we can't inspect it remotely. This logs exactly where
+  // To/Cc/Bcc live so the selectors can be made precise from a real send.
+  function debugDumpRecipients(container) {
+    try {
+      const info = { inputs: {}, ariaLabels: [], chips: [] };
+      ["to", "cc", "bcc"].forEach((f) => {
+        const el = container.querySelector(`input[name="${f}"]`);
+        info.inputs[f] = el ? { found: true, value: el.value || "" } : { found: false };
+      });
+      container.querySelectorAll("[aria-label]").forEach((el) => {
+        const al = el.getAttribute("aria-label") || "";
+        if (/recipient|cc|bcc|\bto\b/i.test(al) && info.ariaLabels.length < 25) {
+          info.ariaLabels.push({
+            tag: el.tagName,
+            aria: al,
+            chips: el.querySelectorAll("span[email]").length,
+          });
+        }
+      });
+      container.querySelectorAll("span[email]").forEach((chip) => {
+        if (info.chips.length >= 12) return;
+        let node = chip.parentElement;
+        let hint = null;
+        for (let i = 0; i < 10 && node && node !== container; i++) {
+          const nm = node.getAttribute && (node.getAttribute("name") || node.getAttribute("aria-label"));
+          if (nm) { hint = { depth: i, attr: nm, tag: node.tagName }; break; }
+          node = node.parentElement;
+        }
+        info.chips.push({ email: chip.getAttribute("email"), hint });
+      });
+      console.log("[Recon][diag] recipient DOM ->", JSON.stringify(info, null, 2));
+    } catch (e) {
+      console.warn("[Recon][diag] dump failed:", e);
+    }
+  }
+
   function getRecipientEmails(container) {
     const results = [];
     const seen = new Set();
@@ -328,6 +365,7 @@
       return;
     }
 
+    debugDumpRecipients(container);
     const recipients = getRecipientEmails(container);
     if (recipients.length === 0) {
       console.warn("[Recon] No recipients found");

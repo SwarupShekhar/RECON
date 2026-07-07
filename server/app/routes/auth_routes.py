@@ -124,7 +124,11 @@ def _build_extension_zip(server_url: str = "") -> io.BytesIO:
             zf.write(path, arcname)
 
         safe_url = server_url.replace("\\", "\\\\").replace('"', '\\"')
-        defaults_js = f'const RECON_DEFAULT_SERVER_URL = "{safe_url}";\n'
+        # `var` (not `const`): the service worker re-injects this file into the
+        # same isolated world on every Gmail SPA "complete" event. `const`
+        # throws "already declared" on re-injection; `var` redeclaration is a
+        # harmless no-op.
+        defaults_js = f'var RECON_DEFAULT_SERVER_URL = "{safe_url}";\n'
         zf.writestr("recon-extension/config.defaults.js", defaults_js)
 
     buffer.seek(0)
