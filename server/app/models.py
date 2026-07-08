@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -58,6 +58,11 @@ class Email(Base):
 
 class Open(Base):
     __tablename__ = "opens"
+    __table_args__ = (
+        # Speeds up dashboard/status aggregation which always filters
+        # opens by email_id together with internal (human vs. proxy).
+        Index("ix_opens_email_internal", "email_id", "internal"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     email_id: Mapped[str] = mapped_column(String(36), ForeignKey("emails.id"), index=True)
@@ -98,6 +103,11 @@ class Link(Base):
 
 class LinkClick(Base):
     __tablename__ = "link_clicks"
+    __table_args__ = (
+        # Speeds up dashboard/status aggregation which always filters
+        # clicks by link_id together with internal (human vs. proxy).
+        Index("ix_link_clicks_link_internal", "link_id", "internal"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     link_id: Mapped[str] = mapped_column(String(36), ForeignKey("links.id"), index=True)

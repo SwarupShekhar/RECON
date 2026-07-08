@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -83,6 +84,22 @@ async def _monthly_report_job() -> None:
     await _send_periodic_report("Monthly", 30)
 
 
+async def _keep_db_warm() -> None:
+    """Ping the DB so Neon's serverless compute never idles into suspend.
+
+    A suspended Neon compute takes ~2-3s to wake on the next request, which
+    is the main source of dashboard-refresh latency. Running a trivial
+    ``SELECT 1`` every few minutes keeps the compute active. Any transient
+    DB blip is swallowed so it can never crash the scheduler.
+    """
+    try:
+        async with async_session() as db:
+            await db.execute(text("SELECT 1"))
+        logger.debug("[scheduler] keep-warm ping ok")
+    except Exception as exc:  # noqa: BLE001 - never let a blip kill the job
+        logger.debug("[scheduler] keep-warm ping failed: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from .auth import warm_jwks_cache
@@ -107,6 +124,14 @@ async def lifespan(app: FastAPI):
 
     scheduler.add_job(_weekly_report_job, CronTrigger(day_of_week="mon", hour=9, minute=0))
     scheduler.add_job(_monthly_report_job, CronTrigger(day="1", hour=9, minute=0))
+    scheduler.add_job(
+        _keep_db_warm,
+        IntervalTrigger(minutes=4),
+        id="keep_db_warm",
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(timezone.utc),
+    )
     scheduler.start()
 
     yield

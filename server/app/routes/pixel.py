@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
+import os
 
 from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy import func, select
@@ -18,6 +19,12 @@ PIXEL_GIF = (
 )
 
 APPLE_MPP_UA_FRAGMENTS = ["CloudImageProxy"]
+KNOWN_PROXY_UA_FRAGMENTS = ["GoogleImageProxy", "ggpht.com", "CloudImageProxy"]
+INTERNAL_OPEN_DOMAINS = {
+    part.strip().lower().lstrip("@")
+    for part in os.environ.get("INTERNAL_OPEN_DOMAINS", "vaidikedu.com").split(",")
+    if part.strip()
+}
 
 # Gmail (and other providers) prefetch/cache every image in a message within
 # seconds of it being sent — before any human could possibly read it. That
@@ -33,6 +40,20 @@ def is_apple_mpp(user_agent: str | None) -> bool:
     if not user_agent:
         return False
     return any(frag in user_agent for frag in APPLE_MPP_UA_FRAGMENTS)
+
+
+def is_known_proxy(user_agent: str | None) -> bool:
+    if not user_agent:
+        return False
+    return any(frag in user_agent for frag in KNOWN_PROXY_UA_FRAGMENTS)
+
+
+def recipient_domain_is_internal(email: Email) -> bool:
+    recipient = (email.recipient_email or "").strip().lower()
+    if "@" not in recipient:
+        return False
+    domain = recipient.rsplit("@", 1)[1]
+    return domain in INTERNAL_OPEN_DOMAINS
 
 
 def is_within_send_grace(created_at: datetime | None) -> bool:
@@ -83,6 +104,7 @@ async def log_open(
             is_within_send_grace(email.created_at)
             or await is_thread_muted(db, email.thread_id)
             or await is_email_muted(db, tracker_id)
+            or recipient_domain_is_internal(email)
         )
 
         open_row = Open(

@@ -35,10 +35,18 @@
   //
   // Fires right before the sender is about to render their own Sent-view
   // copy of a tracked thread, so the pixel fetch(es) that follow get
-  // flagged internal server-side instead of counted as a real open. Muted
-  // once per thread_id per page lifetime — server-side window (30s) covers
-  // render + read time, re-muting on every poll isn't needed.
-  const mutedThreadIds = new Set();
+  // flagged internal server-side instead of counted as a real open. The
+  // server-side window (30s) covers render + read time, so re-muting on
+  // every poll isn't needed — but it CAN'T be a mute-once-per-thread rule:
+  // if the sender re-opens the same tracked thread later in the same page
+  // session, the earlier 30s window has already expired and the pixel would
+  // be counted as a real open. So track the last-muted timestamp per thread
+  // and re-fire when that window has (likely) lapsed. Map threadId -> ms.
+  const mutedThreadTimestamps = new Map();
+  // Skip re-firing only within this window to avoid spamming the server on
+  // rapid repeated events (polls/re-renders); kept below the server's 30s so
+  // a genuine later re-open re-asserts the mute before the old one expires.
+  const REMUTE_MIN_INTERVAL_MS = 20000;
 
   // After the extension is reloaded/updated, content scripts already injected
   // into open Gmail tabs are orphaned: `chrome.runtime` still exists but has no
@@ -56,9 +64,13 @@
   }
 
   function muteThread(threadId) {
-    if (!threadId || !config.serverUrl || mutedThreadIds.has(threadId)) return;
+    if (!threadId || !config.serverUrl) return;
+    // Re-fire the mute unless we already muted this thread very recently, so
+    // a later re-open (past the expired server window) is re-covered.
+    const last = mutedThreadTimestamps.get(threadId);
+    if (last !== undefined && Date.now() - last < REMUTE_MIN_INTERVAL_MS) return;
     if (!runtimeAlive()) return;
-    mutedThreadIds.add(threadId);
+    mutedThreadTimestamps.set(threadId, Date.now());
     chrome.runtime.sendMessage(
       { type: "mute", serverUrl: config.serverUrl, threadId, seconds: 30 },
       () => void chrome.runtime.lastError // fire-and-forget, ignore result
@@ -126,7 +138,9 @@
 
   function buildPixelHtml(trackerId) {
     const url = `${config.serverUrl}/t/${trackerId}/pixel.gif`;
-    return `<img src="${url}" width="1" height="1" style="display:none" alt="">`;
+    // Keep tracking pixel in a zero-height wrapper so Gmail doesn't leave a
+    // visible bottom gap after signatures.
+    return `<span style="display:block;height:0;max-height:0;overflow:hidden;line-height:0;font-size:0;"><img src="${url}" width="1" height="1" style="display:block;width:1px;height:1px;opacity:0;border:0;margin:0;padding:0;" alt="" aria-hidden="true"></span>`;
   }
 
   function getComposeBody(container) {
