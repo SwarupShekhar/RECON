@@ -78,12 +78,20 @@ def recipient_domain_is_internal(email: Email) -> bool:
             if "@" in addr:
                 domains.add(addr.rsplit("@", 1)[1])
 
-    for domain in domains:
-        if domain in INTERNAL_OPEN_DOMAINS:
-            return True
-        if any(domain.endswith(f".{internal}") for internal in INTERNAL_OPEN_DOMAINS):
-            return True
-    return False
+    # One pixel per send tracks the whole recipient set ("one of them opened"),
+    # so we can't tell which recipient opened. Only suppress when EVERY recipient
+    # is internal (a purely internal email). If any external recipient is on the
+    # thread, keep tracking — otherwise Cc'ing a colleague on a mail to an
+    # external lead would silently hide the lead's real opens.
+    if not domains:
+        return False
+
+    def _is_internal(domain: str) -> bool:
+        return domain in INTERNAL_OPEN_DOMAINS or any(
+            domain.endswith(f".{internal}") for internal in INTERNAL_OPEN_DOMAINS
+        )
+
+    return all(_is_internal(domain) for domain in domains)
 
 
 def sender_self_recipient(email: Email) -> bool:
