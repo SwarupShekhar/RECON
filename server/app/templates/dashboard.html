@@ -261,8 +261,15 @@
     var orig = btn.textContent;
     btn.disabled = true;
     if (!silent) btn.textContent = "Refreshing…";
-    fetch("/dashboard/data", { credentials: "same-origin", headers: { Accept: "application/json" } })
+    window.reconAuthToken().then(function (token) {
+      var headers = { Accept: "application/json" };
+      if (token) headers.Authorization = "Bearer " + token;
+      return fetch("/dashboard/data", { credentials: "same-origin", headers: headers });
+    })
       .then(function (res) {
+        // A stale session redirects to /login (HTML). Re-auth instead of
+        // silently failing on the JSON parse.
+        if (res.redirected) { window.location.href = "/login"; throw new Error("reauth"); }
         if (!res.ok) throw new Error("refresh failed");
         return res.json();
       })

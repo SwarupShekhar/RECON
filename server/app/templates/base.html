@@ -290,6 +290,42 @@
       });
     }
   </script>
+  <script>
+    // ClerkJS session keep-alive. The server reads the Clerk __session cookie,
+    // which is a short-lived (~60s) JWT that must be refreshed client-side.
+    // ClerkJS used to load only on /login, so on the dashboard the cookie went
+    // stale and every protected request (dashboard data, tab navigations) 401'd
+    // and bounced through /login. Loading Clerk on every authed page keeps the
+    // cookie fresh, and reconAuthToken() hands XHR a fresh bearer token.
+    window.reconAuthReady = new Promise(function (resolve) { window.__reconResolveAuth = resolve; });
+    window.reconAuthToken = function () {
+      return window.reconAuthReady.then(function () {
+        try {
+          if (window.Clerk && window.Clerk.session) return window.Clerk.session.getToken();
+        } catch (e) {}
+        return null;
+      });
+    };
+    function reconInitClerkSession() {
+      if (!window.Clerk) { window.__reconResolveAuth(); return; }
+      window.Clerk.load()
+        .then(function () { window.__reconResolveAuth(); })
+        .catch(function () { window.__reconResolveAuth(); });
+    }
+  </script>
+  {% if clerk_js_url %}
+  <script
+    async
+    crossorigin="anonymous"
+    data-clerk-publishable-key="{{ clerk_publishable_key }}"
+    src="{{ clerk_js_url }}"
+    onload="reconInitClerkSession()"
+    onerror="window.__reconResolveAuth && window.__reconResolveAuth()"
+  ></script>
+  {% else %}
+  <script>window.__reconResolveAuth && window.__reconResolveAuth();</script>
+  {% endif %}
+
   {% block page_scripts %}{% endblock %}
 </body>
 </html>

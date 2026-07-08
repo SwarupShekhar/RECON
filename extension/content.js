@@ -1200,18 +1200,21 @@
     const indicator = document.createElement('span');
     indicator.className = 'recon-checkmark';
     indicator.dataset.signature = signature;
-    indicator.style.cssText = 'display:inline-flex;align-items:center;gap:4px;max-width:120px;height:20px;cursor:default;user-select:none;position:relative;flex-shrink:0;';
+    // Icon-only chip. The inline text label ("Opened 3x" etc.) used to collide
+    // with Gmail's own row controls/ticks, so detail now lives in hover only:
+    // a rich popover for opened states + a native title tooltip for all states.
+    indicator.style.cssText = 'display:inline-flex;align-items:center;height:20px;cursor:default;user-select:none;position:relative;flex-shrink:0;';
 
     const icon = document.createElement('span');
     icon.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex-shrink:0;';
     icon.innerHTML = checkmarkSvg(statusColor(status));
     indicator.appendChild(icon);
 
-    const preview = document.createElement('span');
-    preview.className = 'recon-checkmark-preview';
-    preview.textContent = buildRowPreviewText(matches, status);
-    preview.style.cssText = `font-size:11px;line-height:1;color:${status === 'grey' ? '#5f6368' : statusColor(status)};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;`;
-    indicator.appendChild(preview);
+    // Native tooltip fallback so hovering the tick always reveals status text
+    // ("Opened 3x" / "Tracked") even before/without the rich popover.
+    indicator.title = status === 'grey'
+      ? 'Tracked — not opened yet'
+      : buildRowPreviewText(matches, status);
 
     if (status !== 'grey') {
       const popover = document.createElement('div');
@@ -1222,8 +1225,6 @@
 
       indicator.addEventListener('mouseenter', () => { popover.style.display = 'block'; });
       indicator.addEventListener('mouseleave', () => { popover.style.display = 'none'; });
-    } else {
-      indicator.title = 'Tracked — not opened yet';
     }
 
     // aria-label is case-varying across Gmail UI versions ("Not starred" vs
