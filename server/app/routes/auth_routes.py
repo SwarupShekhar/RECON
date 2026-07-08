@@ -8,7 +8,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, func
@@ -200,6 +200,42 @@ def _build_extension_zip(server_url: str = "") -> io.BytesIO:
 
 def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
+
+
+# --- Reversible key storage (so the active key can be shown/copied again) ---
+# We keep token_hash for auth lookups, but ALSO store the raw key encrypted at
+# rest with Fernet, keyed off a server-only secret. Any string secret works —
+# we derive a valid 32-byte Fernet key from it. If the secret is unset,
+# encryption is disabled (reveal simply won't be available) rather than crashing.
+def _key_cipher():
+    secret = os.environ.get("RECON_KEY_ENC_SECRET") or os.environ.get("SECRET_KEY")
+    if not secret:
+        return None
+    from base64 import urlsafe_b64encode
+
+    from cryptography.fernet import Fernet
+
+    fernet_key = urlsafe_b64encode(hashlib.sha256(secret.encode()).digest())
+    return Fernet(fernet_key)
+
+
+def _encrypt_token(raw_key: str) -> str | None:
+    cipher = _key_cipher()
+    if not cipher:
+        return None
+    return cipher.encrypt(raw_key.encode()).decode()
+
+
+def _decrypt_token(token_enc: str | None) -> str | None:
+    if not token_enc:
+        return None
+    cipher = _key_cipher()
+    if not cipher:
+        return None
+    try:
+        return cipher.decrypt(token_enc.encode()).decode()
+    except Exception:
+        return None
 
 
 def _dedupe_dashboard_rows(rows: list) -> list:
@@ -729,6 +765,7 @@ async def extension_key_page(
             "created_at": k.created_at,
             "last_used_at": k.last_used_at,
             "revoked": k.revoked,
+            "can_reveal": bool(k.token_enc) and not k.revoked,
         })
     return templates.TemplateResponse("extension_key.html", {
         "request": request, "user": user, "keys": keys, "new_key": None,
@@ -744,7 +781,7 @@ async def extension_key_generate(
 ):
     raw_key = "recon_" + secrets.token_hex(32)
     token_hash = _hash_token(raw_key)
-    api_key = ApiKey(user_id=user.id, token_hash=token_hash)
+    api_key = ApiKey(user_id=user.id, token_hash=token_hash, token_enc=_encrypt_token(raw_key))
     db.add(api_key)
     await db.commit()
 
@@ -760,6 +797,7 @@ async def extension_key_generate(
             "created_at": k.created_at,
             "last_used_at": k.last_used_at,
             "revoked": k.revoked,
+            "can_reveal": bool(k.token_enc) and not k.revoked,
         })
 
     return templates.TemplateResponse("extension_key.html", {
@@ -782,6 +820,28 @@ async def extension_key_revoke(
         api_key.revoked = True
         await db.commit()
     return RedirectResponse(url="/dashboard/extension-key", status_code=303)
+
+
+@router.post("/dashboard/extension-key/{key_id}/reveal")
+async def extension_key_reveal(
+    key_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the decrypted raw key for the signed-in user's own active key.
+    POST (not GET) so the secret never lands in browser history / server access
+    logs as a URL. Scoped to user.id; revoked keys and keys with no stored
+    ciphertext are not revealable."""
+    result = await db.execute(
+        select(ApiKey).where(ApiKey.id == key_id, ApiKey.user_id == user.id)
+    )
+    api_key = result.scalar_one_or_none()
+    if not api_key or api_key.revoked:
+        raise HTTPException(status_code=404, detail="Key not found")
+    raw = _decrypt_token(api_key.token_enc)
+    if not raw:
+        raise HTTPException(status_code=404, detail="Key not recoverable")
+    return {"key": raw}
 
 
 # ---------------------------------------------------------------------------

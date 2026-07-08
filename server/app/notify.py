@@ -83,6 +83,10 @@ def _format_open_message(email, open_row, total_opens: int) -> str:
     if total_opens and total_opens > 1:
         lines.append(f"_{total_opens} opens total on this email_")
 
+    delayed_open_minutes = getattr(open_row, "delayed_open_minutes", None)
+    if delayed_open_minutes is not None:
+        lines.append(f"⏱️ _First human-likely open after {delayed_open_minutes} minutes_")
+
     if not getattr(open_row, "verified", True):
         lines.append("_Unverified — may be email client prefetch_")
 
@@ -136,10 +140,17 @@ async def post_slack(message: str, webhook_url: str | None = None) -> None:
 
 
 async def maybe_alert_open(
-    email, open_row, total_opens: int = 1, webhook_url: str | None = None,
+    email,
+    open_row,
+    total_opens: int = 1,
+    webhook_url: str | None = None,
+    delayed_open_minutes: int | None = None,
 ) -> None:
     if not _truthy(os.environ.get("ALERT_ON_OPEN"), default=True):
         return
+
+    if delayed_open_minutes is not None:
+        setattr(open_row, "delayed_open_minutes", delayed_open_minutes)
 
     message = _format_open_message(email, open_row, total_opens)
     await post_slack(message, webhook_url=webhook_url)

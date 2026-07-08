@@ -119,6 +119,7 @@ async def lifespan(app: FastAPI):
         try:
             await conn.execute(text("ALTER TABLE opens ADD COLUMN IF NOT EXISTS internal BOOLEAN DEFAULT FALSE"))
             await conn.execute(text("ALTER TABLE link_clicks ADD COLUMN IF NOT EXISTS internal BOOLEAN DEFAULT FALSE"))
+            await conn.execute(text("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS token_enc TEXT"))
         except Exception:
             pass
         # create_all won't add indexes to already-existing tables, so create the

@@ -32,7 +32,12 @@
   <tbody>
     {% for k in keys %}
     <tr>
-      <td><code>{{ k.masked }}</code></td>
+      <td>
+        <code class="recon-key-masked" data-key-id="{{ k.id }}">{{ k.masked }}</code>
+        {% if k.can_reveal %}
+        <button type="button" class="btn btn-secondary" style="padding:4px 10px;font-size:0.6875rem;margin-left:6px;" onclick="reconRevealKey('{{ k.id }}', this)">Show &amp; Copy</button>
+        {% endif %}
+      </td>
       <td class="text-muted">{{ k.created_at.strftime("%b %d, %Y") if k.created_at else "—" }}</td>
       <td class="text-muted">{{ k.last_used_at.strftime("%b %d, %Y %H:%M") if k.last_used_at else "Never" }}</td>
       <td>
@@ -56,4 +61,30 @@
 {% else %}
 <p class="text-muted">No API keys yet. Generate one to connect the Recon browser extension.</p>
 {% endif %}
+
+<script>
+  // Fetch the decrypted key on demand (POST so it isn't logged as a URL),
+  // reveal it inline, and copy to clipboard via the shared helper.
+  async function reconRevealKey(keyId, btn) {
+    const original = btn.textContent;
+    btn.disabled = true;
+    try {
+      const res = await fetch("/dashboard/extension-key/" + keyId + "/reveal", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+      });
+      if (!res.ok) throw new Error("reveal failed");
+      const data = await res.json();
+      const codeEl = btn.parentElement.querySelector(".recon-key-masked");
+      if (codeEl) codeEl.textContent = data.key;
+      reconCopyText(data.key, btn);
+    } catch (e) {
+      btn.textContent = "Failed";
+      setTimeout(function () { btn.textContent = original; btn.disabled = false; }, 1500);
+      return;
+    }
+    btn.disabled = false;
+  }
+</script>
 {% endblock %}

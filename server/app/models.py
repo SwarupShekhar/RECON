@@ -33,6 +33,9 @@ class ApiKey(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=gen_uuid)
     user_id: Mapped[str] = mapped_column(String(64), ForeignKey("users.id"), index=True)
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # Raw key, Fernet-encrypted at rest, so it can be shown/copied again later.
+    # Nullable: keys created before this feature (or with no enc secret) can't be revealed.
+    token_enc: Mapped[str | None] = mapped_column(Text, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     revoked: Mapped[bool] = mapped_column(Boolean, default=False)

@@ -10,11 +10,13 @@ from ..database import get_db
 from ..models import Email, Link, LinkClick
 from ..notify import maybe_alert_click, webhook_for_email
 from .pixel import (
+    has_recent_internal_sender_activity,
     is_apple_mpp,
     is_email_muted,
     is_thread_muted,
     is_within_send_grace,
     recipient_domain_is_internal,
+    sender_self_recipient,
 )
 
 # Security gateways / link scanners at some recipient orgs (e.g. school
@@ -86,6 +88,16 @@ async def follow_link(
         or (email is not None and await is_email_muted(db, email.id))
         or (email is not None and is_within_send_grace(email.created_at))
         or (email is not None and recipient_domain_is_internal(email))
+        or (email is not None and sender_self_recipient(email))
+        or (
+            email is not None
+            and await has_recent_internal_sender_activity(
+                db,
+                email.id,
+                ip=ip,
+                user_agent=user_agent,
+            )
+        )
     )
 
     click_row = LinkClick(

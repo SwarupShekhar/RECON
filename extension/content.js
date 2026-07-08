@@ -1049,6 +1049,14 @@
     return '#bbb';
   }
 
+  // Compact thread-list status text shown next to the checkmark icon.
+  function buildRowPreviewText(matches, status) {
+    const totalOpens = matches.reduce((sum, m) => sum + (m.total_opens || 0), 0);
+    if (status === 'grey') return 'Tracked';
+    if (status === 'green') return totalOpens > 1 ? `Opened ${totalOpens}x` : 'Opened';
+    return totalOpens > 1 ? `Opened ${totalOpens}x?` : 'Opened?';
+  }
+
   // Real SVG instead of a unicode "✓✓" + negative letter-spacing hack — the
   // text-glyph version rendered inconsistently across OS/font stacks
   // (sometimes drawing as two visibly separated pairs instead of one tight
@@ -1192,8 +1200,18 @@
     const indicator = document.createElement('span');
     indicator.className = 'recon-checkmark';
     indicator.dataset.signature = signature;
-    indicator.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;width:22px;height:20px;cursor:default;user-select:none;position:relative;flex-shrink:0;';
-    indicator.innerHTML = checkmarkSvg(statusColor(status));
+    indicator.style.cssText = 'display:inline-flex;align-items:center;gap:4px;max-width:120px;height:20px;cursor:default;user-select:none;position:relative;flex-shrink:0;';
+
+    const icon = document.createElement('span');
+    icon.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex-shrink:0;';
+    icon.innerHTML = checkmarkSvg(statusColor(status));
+    indicator.appendChild(icon);
+
+    const preview = document.createElement('span');
+    preview.className = 'recon-checkmark-preview';
+    preview.textContent = buildRowPreviewText(matches, status);
+    preview.style.cssText = `font-size:11px;line-height:1;color:${status === 'grey' ? '#5f6368' : statusColor(status)};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;`;
+    indicator.appendChild(preview);
 
     if (status !== 'grey') {
       const popover = document.createElement('div');
@@ -1205,7 +1223,7 @@
       indicator.addEventListener('mouseenter', () => { popover.style.display = 'block'; });
       indicator.addEventListener('mouseleave', () => { popover.style.display = 'none'; });
     } else {
-      indicator.title = 'Sent — not opened yet';
+      indicator.title = 'Tracked — not opened yet';
     }
 
     // aria-label is case-varying across Gmail UI versions ("Not starred" vs
