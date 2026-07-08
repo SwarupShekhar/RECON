@@ -106,13 +106,17 @@ async def follow_link(
         burst_since = datetime.now(timezone.utc) - timedelta(seconds=SCANNER_BURST_SECONDS)
         if await is_scanner_burst(db, email.id, since=burst_since):
             burst_ids = await scanner_burst_click_ids(db, email.id, since=burst_since)
-            if burst_ids:
-                await db.execute(
-                    update(LinkClick)
-                    .where(LinkClick.id.in_(burst_ids))
-                    .values(internal=True)
-                )
-                await db.commit()
+            # Always include this row's own id so its internal flag is persisted
+            # even if the burst select races to an incomplete/empty set —
+            # otherwise the DB row could stay internal=False while we suppress
+            # its alert below, leaving it counted as a real click.
+            ids_to_flag = set(burst_ids) | {click_row.id}
+            await db.execute(
+                update(LinkClick)
+                .where(LinkClick.id.in_(ids_to_flag))
+                .values(internal=True)
+            )
+            await db.commit()
             click_row.internal = True
 
     if email and not click_row.internal:
