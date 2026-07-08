@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -93,11 +94,14 @@ async def _keep_db_warm() -> None:
     DB blip is swallowed so it can never crash the scheduler.
     """
     try:
+        # Bound the ping so a degraded/hung DB can't wedge the coroutine and its
+        # pooled connection indefinitely.
         async with async_session() as db:
-            await db.execute(text("SELECT 1"))
+            await asyncio.wait_for(db.execute(text("SELECT 1")), timeout=10)
         logger.debug("[scheduler] keep-warm ping ok")
     except Exception as exc:  # noqa: BLE001 - never let a blip kill the job
-        logger.debug("[scheduler] keep-warm ping failed: %s", exc)
+        # Warn (not debug) so repeated DB connectivity issues are visible in prod.
+        logger.warning("[scheduler] keep-warm ping failed: %s", exc)
 
 
 @asynccontextmanager
@@ -115,6 +119,14 @@ async def lifespan(app: FastAPI):
         try:
             await conn.execute(text("ALTER TABLE opens ADD COLUMN IF NOT EXISTS internal BOOLEAN DEFAULT FALSE"))
             await conn.execute(text("ALTER TABLE link_clicks ADD COLUMN IF NOT EXISTS internal BOOLEAN DEFAULT FALSE"))
+        except Exception:
+            pass
+        # create_all won't add indexes to already-existing tables, so create the
+        # composite indexes explicitly (IF NOT EXISTS) — mirrors the model's
+        # Index() declarations. Non-CONCURRENT so it's valid inside this txn.
+        try:
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_opens_email_internal ON opens (email_id, internal)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_link_clicks_link_internal ON link_clicks (link_id, internal)"))
         except Exception:
             pass
         try:

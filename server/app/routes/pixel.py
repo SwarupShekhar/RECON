@@ -19,7 +19,6 @@ PIXEL_GIF = (
 )
 
 APPLE_MPP_UA_FRAGMENTS = ["CloudImageProxy"]
-KNOWN_PROXY_UA_FRAGMENTS = ["GoogleImageProxy", "ggpht.com", "CloudImageProxy"]
 INTERNAL_OPEN_DOMAINS = {
     part.strip().lower().lstrip("@")
     for part in os.environ.get("INTERNAL_OPEN_DOMAINS", "vaidikedu.com").split(",")
@@ -40,12 +39,6 @@ def is_apple_mpp(user_agent: str | None) -> bool:
     if not user_agent:
         return False
     return any(frag in user_agent for frag in APPLE_MPP_UA_FRAGMENTS)
-
-
-def is_known_proxy(user_agent: str | None) -> bool:
-    if not user_agent:
-        return False
-    return any(frag in user_agent for frag in KNOWN_PROXY_UA_FRAGMENTS)
 
 
 def recipient_domain_is_internal(email: Email) -> bool:

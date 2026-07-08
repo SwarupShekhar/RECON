@@ -137,7 +137,12 @@
   }
 
   function buildPixelHtml(trackerId) {
-    const url = `${config.serverUrl}/t/${trackerId}/pixel.gif`;
+    // Sanitize both interpolated parts before they land in the img src to
+    // prevent any attribute breakout / HTML injection via insertAdjacentHTML:
+    // strip quotes/brackets/whitespace from the (config-supplied) base URL and
+    // URL-encode the tracker id.
+    const base = String(config.serverUrl || "").replace(/["'<>\s]/g, "").replace(/\/+$/, "");
+    const url = `${base}/t/${encodeURIComponent(trackerId)}/pixel.gif`;
     // Keep tracking pixel in a zero-height wrapper so Gmail doesn't leave a
     // visible bottom gap after signatures.
     return `<span style="display:block;height:0;max-height:0;overflow:hidden;line-height:0;font-size:0;"><img src="${url}" width="1" height="1" style="display:block;width:1px;height:1px;opacity:0;border:0;margin:0;padding:0;" alt="" aria-hidden="true"></span>`;
