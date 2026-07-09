@@ -12,3 +12,4 @@ itsdangerous==2.2.0
 pyjwt[crypto]==2.10.1
 cryptography==49.0.0
 python-multipart==0.0.12
+sentry-sdk

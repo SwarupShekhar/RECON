@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
-from ..models import EmailMute, PixelMute
+from ..models import Email, EmailMute, PixelMute
 from ..schemas import MuteRequest
 
 router = APIRouter()
@@ -33,7 +33,21 @@ async def mute_thread(req: MuteRequest, db: AsyncSession = Depends(get_db)):
         else:
             db.add(PixelMute(thread_id=req.thread_id, muted_until=new_until))
 
+    valid_email_ids: set[str] = set()
+    if req.email_ids:
+        # /mute can race with send/track lifecycle in edge cases (or receive
+        # stale ids). Filter to emails that actually exist so FK checks never
+        # 500 the endpoint.
+        existing_result = await db.execute(
+            select(Email.id).where(Email.id.in_(req.email_ids))
+        )
+        valid_email_ids = {row[0] for row in existing_result.all()}
+
+    skipped_email_ids: list[str] = []
     for email_id in req.email_ids:
+        if email_id not in valid_email_ids:
+            skipped_email_ids.append(email_id)
+            continue
         result = await db.execute(select(EmailMute).where(EmailMute.email_id == email_id))
         mute = result.scalar_one_or_none()
         if mute:
@@ -43,4 +57,10 @@ async def mute_thread(req: MuteRequest, db: AsyncSession = Depends(get_db)):
             db.add(EmailMute(email_id=email_id, muted_until=new_until))
 
     await db.commit()
-    return {"muted": True, "thread_id": req.thread_id, "email_ids": req.email_ids, "muted_until": new_until.isoformat()}
+    return {
+        "muted": True,
+        "thread_id": req.thread_id,
+        "email_ids": req.email_ids,
+        "skipped_email_ids": skipped_email_ids,
+        "muted_until": new_until.isoformat(),
+    }

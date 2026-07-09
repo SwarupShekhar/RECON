@@ -11,7 +11,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select, func
+from sqlalchemy import false, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import get_current_user, get_current_user_from_api_key
@@ -300,6 +300,12 @@ def _grouped_recipients(all_recipients_json: str | None, fallback_email: str):
 
 async def _load_dashboard_data(user: User, db: AsyncSession) -> tuple[list[dict], dict]:
     """Single round-trip dashboard query with correlated subqueries for last-open and clicks."""
+    proxy_ua_condition = false()
+    if PROXY_UA_FRAGMENTS:
+        proxy_ua_condition = or_(
+            *[func.coalesce(Open.user_agent, "").ilike(f"%{frag}%") for frag in PROXY_UA_FRAGMENTS]
+        )
+
     last_opened_sq = (
         select(func.max(Open.opened_at))
         .where(Open.email_id == Email.id, Open.internal == False)
@@ -322,6 +328,11 @@ async def _load_dashboard_data(user: User, db: AsyncSession) -> tuple[list[dict]
             func.count(Open.id).filter(Open.verified == True, Open.internal == False).label("verified_opens"),
             last_opened_sq.label("last_opened"),
             link_clicks_sq.label("link_clicks"),
+            func.count(Open.id).filter(
+                Open.internal == False,
+                Open.verified == True,
+                ~proxy_ua_condition,
+            ).label("human_likely_opens"),
         )
         .outerjoin(Open, Email.id == Open.email_id)
         .where(Email.sender_email == user.email)
@@ -330,22 +341,6 @@ async def _load_dashboard_data(user: User, db: AsyncSession) -> tuple[list[dict]
         .limit(200)
     )
     rows = _dedupe_dashboard_rows(result.all())
-    email_ids = [row[0].id for row in rows]
-
-    open_quality_counts: dict[str, dict[str, int]] = {}
-    if email_ids:
-        opens_result = await db.execute(
-            select(Open.email_id, Open.verified, Open.user_agent)
-            .where(Open.email_id.in_(email_ids), Open.internal == False)
-        )
-        for email_id, verified, user_agent in opens_result.all():
-            bucket = open_quality_counts.setdefault(
-                email_id, {"human_likely_opens": 0, "proxy_or_preload_opens": 0}
-            )
-            if verified and not _is_proxy_user_agent(user_agent):
-                bucket["human_likely_opens"] += 1
-            else:
-                bucket["proxy_or_preload_opens"] += 1
 
     emails: list[dict] = []
     stats = {
@@ -356,14 +351,16 @@ async def _load_dashboard_data(user: User, db: AsyncSession) -> tuple[list[dict]
         "human_likely_opened": 0,
         "proxy_or_preload_only": 0,
     }
-    for email, total_opens, verified_opens, last_opened, link_clicks in rows:
+    for email, total_opens, verified_opens, last_opened, link_clicks, human_likely_opens in rows:
         total_opens = total_opens or 0
         verified_opens = verified_opens or 0
         link_clicks = link_clicks or 0
+        human_likely_opens = human_likely_opens or 0
         followup = _needs_followup(email.created_at, total_opens)
-        quality = open_quality_counts.get(
-            email.id, {"human_likely_opens": 0, "proxy_or_preload_opens": 0}
-        )
+        quality = {
+            "human_likely_opens": human_likely_opens,
+            "proxy_or_preload_opens": max(total_opens - human_likely_opens, 0),
+        }
         grouped_recipients = _grouped_recipients(email.all_recipients, email.recipient_email)
         recipients_flat = []
         for field, addrs in grouped_recipients:

@@ -18,6 +18,11 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 logger = logging.getLogger(__name__)
 
+try:
+    import sentry_sdk
+except Exception:  # pragma: no cover - optional dependency fallback
+    sentry_sdk = None
+
 load_dotenv()
 
 from .auth import resolve_sender_email
@@ -29,6 +34,37 @@ from .routes import links, mute, pixel, reports, status, track
 
 scheduler = AsyncIOScheduler()
 _last_digest_snapshot: dict[str, dict[str, int]] = {}
+
+
+def _env_truthy(value: str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def init_sentry() -> None:
+    if sentry_sdk is None:
+        logger.warning("Sentry disabled: sentry_sdk package not installed")
+        return
+
+    dsn = os.environ.get("SENTRY_DSN", "").strip()
+    if not dsn:
+        logger.info("Sentry disabled: SENTRY_DSN not configured")
+        return
+
+    traces_sample_rate_raw = os.environ.get("SENTRY_TRACES_SAMPLE_RATE", "0.1").strip() or "0.1"
+    try:
+        traces_sample_rate = float(traces_sample_rate_raw)
+    except ValueError:
+        traces_sample_rate = 0.1
+
+    sentry_sdk.init(
+        dsn=dsn,
+        send_default_pii=_env_truthy(os.environ.get("SENTRY_SEND_DEFAULT_PII"), default=False),
+        traces_sample_rate=traces_sample_rate,
+        environment=os.environ.get("SENTRY_ENVIRONMENT", "production"),
+    )
+    logger.info("Sentry enabled")
 
 
 async def _send_periodic_report(period_label: str, days: int) -> None:
@@ -126,8 +162,12 @@ async def lifespan(app: FastAPI):
         # composite indexes explicitly (IF NOT EXISTS) — mirrors the model's
         # Index() declarations. Non-CONCURRENT so it's valid inside this txn.
         try:
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_emails_sender_created_at ON emails (sender_email, created_at DESC)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_opens_email_internal ON opens (email_id, internal)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_opens_email_internal_opened_at ON opens (email_id, internal, opened_at DESC)"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_link_clicks_link_internal ON link_clicks (link_id, internal)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_link_clicks_link_internal_clicked_at ON link_clicks (link_id, internal, clicked_at DESC)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_links_email_created_at ON links (email_id, created_at)"))
         except Exception:
             pass
         try:
@@ -151,6 +191,8 @@ async def lifespan(app: FastAPI):
 
     scheduler.shutdown(wait=False)
 
+
+init_sentry()
 
 app = FastAPI(
     title="Recon",
@@ -239,6 +281,12 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+if _env_truthy(os.environ.get("SENTRY_DEBUG_ROUTE"), default=False):
+    @app.get("/sentry-debug")
+    async def trigger_sentry_error():
+        raise RuntimeError("Sentry debug route triggered")
 
 
 # ---------------------------------------------------------------------------
